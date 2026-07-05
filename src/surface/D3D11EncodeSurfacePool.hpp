@@ -26,11 +26,14 @@ public:
     EncodeSurface acquire();
     void release(const EncodeSurface& surface);
     void waitAllFree();
+    uint32_t surfaceCount() const;
+    uint32_t activeCount() const;
 
 private:
     struct Slot {
         D3D11CoreLib::D3D11Resource resource;
         bool inUse = false;
+        uint64_t generation = 0;
     };
 
     D3D11CoreLib::D3D11Core* core_ = nullptr;
@@ -38,10 +41,12 @@ private:
     uint32_t height_ = 0;
     DXGI_FORMAT format_ = DXGI_FORMAT_UNKNOWN;
     bool blockingAcquire_ = true;
+    uint64_t generation_ = 1;
+    uint32_t activeCount_ = 0;
 
     std::vector<Slot> slots_;
     std::size_t nextIndex_ = 0;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::condition_variable cv_;
 };
 

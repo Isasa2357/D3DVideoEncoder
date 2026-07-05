@@ -38,5 +38,20 @@ int main() {
     queue.waitDrained();
     queue.close();
     require_true(!queue.pop(out), "closed pop drains");
+
+    EncodeJobQueue dropOldestQueue;
+    dropOldestQueue.initialize(1, EncoderQueueFullPolicy::DropOldest);
+    EncodeJob oldJob; oldJob.timestamp100ns = 10; oldJob.surface.poolIndex = 7;
+    EncodeJob newJob; newJob.timestamp100ns = 20;
+    EncodeJob dropped;
+    require_true(dropOldestQueue.push(oldJob, nullptr), "drop oldest push old");
+    require_true(dropOldestQueue.push(newJob, &dropped), "drop oldest accepts new");
+    require_true(dropped.timestamp100ns == 10, "drop oldest returns dropped job");
+    require_true(dropped.surface.poolIndex == 7, "drop oldest preserves dropped surface bookkeeping");
+    require_true(dropOldestQueue.pop(out), "drop oldest pop new");
+    require_true(out.timestamp100ns == 20, "drop oldest new timestamp");
+    dropOldestQueue.jobDone();
+    dropOldestQueue.close();
+
     return 0;
 }

@@ -1,6 +1,7 @@
 #include "surface/D3D11EncodeSurfacePool.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 namespace D3DVideoEncoderLib {
@@ -20,13 +21,21 @@ void D3D11EncodeSurfacePool::initialize(
         throw std::invalid_argument("D3D11EncodeSurfacePool supports only NV12/P010 encode surfaces.");
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [this]() { return activeCount_ == 0; });
+
     core_ = &core;
     width_ = width;
     height_ = height;
     format_ = format;
     blockingAcquire_ = blockingAcquire;
     nextIndex_ = 0;
+    activeCount_ = 0;
+    if (generation_ == std::numeric_limits<uint64_t>::max()) {
+        generation_ = 1;
+    } else {
+        ++generation_;
+    }
 
     const uint32_t surfaceCount = std::max<uint32_t>(count, 3u);
     slots_.clear();
@@ -35,6 +44,7 @@ void D3D11EncodeSurfacePool::initialize(
     const UINT bindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
     for (uint32_t i = 0; i < surfaceCount; ++i) {
         Slot slot;
+        slot.generation = generation_;
         slot.resource = D3D11CoreLib::CreateTexture2D(
             core,
             width_,
@@ -71,6 +81,7 @@ EncodeSurface D3D11EncodeSurfacePool::acquire() {
     }
 
     slots_[index].inUse = true;
+    ++activeCount_;
     nextIndex_ = (index + 1) % slots_.size();
 
     D3D11CoreLib::D3D11Resource resource = slots_[index].resource;
@@ -84,25 +95,41 @@ EncodeSurface D3D11EncodeSurfacePool::acquire() {
     surface.height = height_;
     surface.subresource = 0;
     surface.poolIndex = index;
+    surface.poolGeneration = generation_;
     return surface;
 }
 
 void D3D11EncodeSurfacePool::release(const EncodeSurface& surface) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (surface.poolIndex < slots_.size()) {
-        slots_[surface.poolIndex].inUse = false;
-        cv_.notify_one();
+    if (surface.poolIndex >= slots_.size()) {
+        return;
     }
+
+    Slot& slot = slots_[surface.poolIndex];
+    if (slot.generation != surface.poolGeneration || !slot.inUse) {
+        return;
+    }
+
+    slot.inUse = false;
+    if (activeCount_ > 0) {
+        --activeCount_;
+    }
+    cv_.notify_all();
 }
 
 void D3D11EncodeSurfacePool::waitAllFree() {
     std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [&]() {
-        for (const auto& slot : slots_) {
-            if (slot.inUse) return false;
-        }
-        return true;
-    });
+    cv_.wait(lock, [&]() { return activeCount_ == 0; });
+}
+
+uint32_t D3D11EncodeSurfacePool::surfaceCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return static_cast<uint32_t>(slots_.size());
+}
+
+uint32_t D3D11EncodeSurfacePool::activeCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return activeCount_;
 }
 
 } // namespace D3DVideoEncoderLib

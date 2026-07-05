@@ -32,6 +32,7 @@ struct EncodeSurface {
 
     // Pool bookkeeping. Adapters own the pools; backend never mutates this.
     std::size_t poolIndex = static_cast<std::size_t>(-1);
+    uint64_t poolGeneration = 0;
 };
 
 } // namespace D3DVideoEncoderLib

@@ -314,3 +314,10 @@ git push
 4. NvencD3D12 backend
 5. native D3D12 Video Encode backend
 6. D3D12 + Media Foundation backend の再検討
+
+
+## Recent stability improvements
+
+The D3D11 Media Foundation backend now reports failures with encoder context such as codec, input format, frame size, frame rate, bitrate, hardware-transform settings, and the Media Foundation call that failed.  It also checks Media Foundation encoder capabilities before constructing the sink writer so unsupported HEVC/P010 environments fail with a clear message.
+
+The D3D11 encode surface pool now tracks active surfaces with per-pool generations, waits for all outstanding surfaces during flush/close, releases surfaces if input preparation fails, and returns dropped `DropOldest` queue jobs to the encoder so their surfaces are released correctly.

@@ -11,6 +11,7 @@
 #include <atomic>
 #include <memory>
 #include <thread>
+#include <vector>
 
 namespace D3DVideoEncoderLib {
 
@@ -35,6 +36,8 @@ private:
     void encodeOrQueue(EncodeSurface surface, int64_t timestamp100ns, int64_t duration100ns);
     void encodeNow(const EncodeSurface& surface, int64_t timestamp100ns, int64_t duration100ns);
     void releaseSurface(const EncodeSurface& surface);
+    void releasePendingJobs(std::vector<EncodeJob>& jobs);
+    void throwWorkerExceptionIfSet();
     void startWorkerIfNeeded();
     void workerMain();
     void stopWorker();

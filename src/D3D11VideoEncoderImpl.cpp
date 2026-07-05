@@ -5,6 +5,7 @@
 
 #include <D3DVideoEncoder/D3DVideoEncoderError.hpp>
 
+#include <cstddef>
 #include <sstream>
 #include <utility>
 
@@ -101,6 +102,7 @@ void D3D11VideoEncoder::Impl::write(ID3D11Texture2D* texture, int64_t timestamp1
     if (!open_) {
         throw D3DVideoEncoderError("write() called after close().");
     }
+    throwWorkerExceptionIfSet();
     if (timestamp100ns <= lastTimestamp100ns_) {
         throw D3DVideoEncoderError("timestamp100ns must be strictly increasing.");
     }
@@ -118,7 +120,12 @@ void D3D11VideoEncoder::Impl::encodeOrQueue(EncodeSurface surface, int64_t times
     }
 
     if (!desc_.asyncMode) {
-        encodeNow(surface, timestamp100ns, duration100ns);
+        try {
+            encodeNow(surface, timestamp100ns, duration100ns);
+        } catch (...) {
+            releaseSurface(surface);
+            throw;
+        }
         releaseSurface(surface);
         return;
     }
@@ -127,13 +134,23 @@ void D3D11VideoEncoder::Impl::encodeOrQueue(EncodeSurface surface, int64_t times
     job.surface = surface;
     job.timestamp100ns = timestamp100ns;
     job.duration100ns = duration100ns;
-    if (!jobQueue_.push(std::move(job))) {
+
+    EncodeJob droppedJob;
+    try {
+        if (!jobQueue_.push(std::move(job), &droppedJob)) {
+            releaseSurface(surface);
+        } else if (droppedJob.surface.poolIndex != static_cast<std::size_t>(-1)) {
+            releaseSurface(droppedJob.surface);
+        }
+    } catch (...) {
         releaseSurface(surface);
+        if (droppedJob.surface.poolIndex != static_cast<std::size_t>(-1)) {
+            releaseSurface(droppedJob.surface);
+        }
+        throw;
     }
 
-    if (workerErrorSet_.load()) {
-        std::rethrow_exception(workerException_);
-    }
+    throwWorkerExceptionIfSet();
 }
 
 void D3D11VideoEncoder::Impl::encodeNow(const EncodeSurface& surface, int64_t timestamp100ns, int64_t duration100ns) {
@@ -142,6 +159,19 @@ void D3D11VideoEncoder::Impl::encodeNow(const EncodeSurface& surface, int64_t ti
 
 void D3D11VideoEncoder::Impl::releaseSurface(const EncodeSurface& surface) {
     input_.release(surface);
+}
+
+void D3D11VideoEncoder::Impl::releasePendingJobs(std::vector<EncodeJob>& jobs) {
+    for (auto& job : jobs) {
+        releaseSurface(job.surface);
+    }
+    jobs.clear();
+}
+
+void D3D11VideoEncoder::Impl::throwWorkerExceptionIfSet() {
+    if (workerErrorSet_.load()) {
+        std::rethrow_exception(workerException_);
+    }
 }
 
 void D3D11VideoEncoder::Impl::startWorkerIfNeeded() {
@@ -165,26 +195,36 @@ void D3D11VideoEncoder::Impl::workerMain() {
     } catch (...) {
         workerException_ = std::current_exception();
         workerErrorSet_.store(true);
+        auto pending = jobQueue_.cancelPending();
+        releasePendingJobs(pending);
     }
 }
 
 void D3D11VideoEncoder::Impl::stopWorker() {
     if (!desc_.asyncMode) return;
-    jobQueue_.waitDrained();
-    jobQueue_.close();
+
+    if (workerErrorSet_.load()) {
+        auto pending = jobQueue_.cancelPending();
+        releasePendingJobs(pending);
+    } else {
+        jobQueue_.waitDrained();
+        jobQueue_.close();
+    }
+
     if (worker_.joinable()) {
         worker_.join();
     }
-    if (workerErrorSet_.load()) {
-        std::rethrow_exception(workerException_);
-    }
+    throwWorkerExceptionIfSet();
 }
 
 void D3D11VideoEncoder::Impl::flush() {
     if (!open_) return;
+    throwWorkerExceptionIfSet();
     if (desc_.asyncMode) {
         jobQueue_.waitDrained();
+        throwWorkerExceptionIfSet();
     }
+    input_.waitAllSurfacesFree();
     input_.flush();
     backend_->flush();
 }
@@ -192,11 +232,30 @@ void D3D11VideoEncoder::Impl::flush() {
 void D3D11VideoEncoder::Impl::close() {
     if (!open_) return;
 
-    stopWorker();
-    input_.flush();
-    backend_->close();
+    std::exception_ptr pendingException = nullptr;
+
+    try {
+        stopWorker();
+    } catch (...) {
+        pendingException = std::current_exception();
+    }
+
+    try {
+        input_.waitAllSurfacesFree();
+        input_.flush();
+        backend_->close();
+    } catch (...) {
+        if (!pendingException) {
+            pendingException = std::current_exception();
+        }
+    }
+
     open_ = false;
     log_.info("D3D11VideoEncoder closed");
+
+    if (pendingException) {
+        std::rethrow_exception(pendingException);
+    }
 }
 
 } // namespace D3DVideoEncoderLib

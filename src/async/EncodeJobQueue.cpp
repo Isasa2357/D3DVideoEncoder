@@ -16,6 +16,10 @@ void EncodeJobQueue::initialize(uint32_t capacity, EncoderQueueFullPolicy policy
 }
 
 bool EncodeJobQueue::push(EncodeJob job) {
+    return push(std::move(job), nullptr);
+}
+
+bool EncodeJobQueue::push(EncodeJob job, EncodeJob* droppedJob) {
     std::unique_lock<std::mutex> lock(mutex_);
     if (closed_) {
         throw std::runtime_error("EncodeJobQueue::push called after close.");
@@ -30,7 +34,12 @@ bool EncodeJobQueue::push(EncodeJob job) {
         case EncoderQueueFullPolicy::DropNewest:
             return false;
         case EncoderQueueFullPolicy::DropOldest:
-            queue_.pop_front();
+            if (!queue_.empty()) {
+                if (droppedJob) {
+                    *droppedJob = std::move(queue_.front());
+                }
+                queue_.pop_front();
+            }
             break;
         }
     }
@@ -68,6 +77,25 @@ void EncodeJobQueue::close() {
     cvNotEmpty_.notify_all();
     cvNotFull_.notify_all();
     cvDrained_.notify_all();
+}
+
+std::vector<EncodeJob> EncodeJobQueue::cancelPending() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    closed_ = true;
+
+    std::vector<EncodeJob> pending;
+    pending.reserve(queue_.size());
+    while (!queue_.empty()) {
+        pending.push_back(std::move(queue_.front()));
+        queue_.pop_front();
+    }
+
+    cvNotEmpty_.notify_all();
+    cvNotFull_.notify_all();
+    if (activeJobs_ == 0) {
+        cvDrained_.notify_all();
+    }
+    return pending;
 }
 
 void EncodeJobQueue::waitDrained() {

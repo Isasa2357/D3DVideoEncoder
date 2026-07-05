@@ -31,6 +31,9 @@ public:
 
 private:
     GUID codecSubtype() const;
+    GUID inputSubtype() const;
+    std::string describeConfiguration() const;
+    void verifyCapabilities() const;
     void configureOutputType(IMFMediaType* mediaType) const;
     void configureInputType(IMFMediaType* mediaType) const;
 

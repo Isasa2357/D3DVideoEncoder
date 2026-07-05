@@ -87,11 +87,24 @@ EncodeSurface D3D11VideoInputAdapter::prepare(ID3D11Texture2D* texture) {
     validateTexture(texture, texDesc);
 
     EncodeSurface dst = surfacePool_.acquire();
+    struct SurfaceGuard {
+        D3D11EncodeSurfacePool* pool = nullptr;
+        EncodeSurface* surface = nullptr;
+        bool active = true;
+        ~SurfaceGuard() {
+            if (active && pool && surface) {
+                pool->release(*surface);
+            }
+        }
+        void dismiss() noexcept { active = false; }
+    } guard{ &surfacePool_, &dst, true };
+
     ID3D11DeviceContext* context = core_->GetImmediateContext();
 
     if (texDesc.Format == ToDxgiFormat(desc_.internalFormat)) {
         context->CopyResource(dst.d3d11Texture.Get(), texture);
         core_->Flush();
+        guard.dismiss();
         return dst;
     }
 
@@ -120,11 +133,16 @@ EncodeSurface D3D11VideoInputAdapter::prepare(ID3D11Texture2D* texture) {
     // Input preparation is synchronous. Flush keeps Media Foundation from seeing a surface
     // before copy/convert commands have reached the GPU.
     core_->Flush();
+    guard.dismiss();
     return dst;
 }
 
 void D3D11VideoInputAdapter::release(const EncodeSurface& surface) {
     surfacePool_.release(surface);
+}
+
+void D3D11VideoInputAdapter::waitAllSurfacesFree() {
+    surfacePool_.waitAllFree();
 }
 
 void D3D11VideoInputAdapter::flush() {

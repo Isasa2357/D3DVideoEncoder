@@ -19,6 +19,7 @@ public:
 
     EncodeSurface prepare(ID3D11Texture2D* texture);
     void release(const EncodeSurface& surface);
+    void waitAllSurfacesFree();
     void flush();
 
 private:
