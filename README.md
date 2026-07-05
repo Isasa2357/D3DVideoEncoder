@@ -22,14 +22,14 @@
 | D3D11 `BGRA8` / `RGBA8` / `RGBA16F` 入力 | D3D11Processingで `NV12` / `P010` へ変換 |
 | Media Foundation backend | D3D11専用で対応 |
 | H.264 MP4 | 対応 |
-| HEVC MP4 | 対応予定/環境依存。Media Foundation MFTに依存 |
-| async write | 対応 |
+| HEVC MP4 | 環境依存で対応。`QueryMediaFoundationCapabilities()` で事前確認 |
+| async write | 対応。実動画テスト追加済み |
 | D3D12入力API | 分離済み。backend未実装 |
 | D3D12 + Media Foundation | 未対応。将来実装 |
 | NVENC D3D11 | 未実装 |
 | NVENC D3D12 | 未実装 |
 | native D3D12 Video Encode | 未実装 |
-| AV1 | 未実装 |
+| AV1 | 未実装。capability query上は確認項目のみ |
 
 ---
 
@@ -163,6 +163,36 @@ int main() {
 
 ---
 
+## Media Foundation capability query
+
+HEVC encoder や P010(Main10) 入力は、Windows環境やインストール済みMedia Foundation MFTに依存します。
+そのため、HEVC/P010を使う前に capability query で確認できます。
+
+```cpp
+const auto caps = D3DVideoEncoderLib::D3D11VideoEncoder::QueryMediaFoundationCapabilities();
+
+if (caps.supportsHevcP010()) {
+    // desc.codec = VideoCodec::HEVC;
+    // desc.internalFormat = VideoPixelFormat::P010;
+} else {
+    // H.264/NV12 などへfallback
+}
+```
+
+個別の組み合わせだけ確認することもできます。
+
+```cpp
+const auto hevcP010 = D3DVideoEncoderLib::D3D11VideoEncoder::QueryMediaFoundationSupport(
+    D3DVideoEncoderLib::VideoCodec::HEVC,
+    D3DVideoEncoderLib::VideoPixelFormat::P010);
+
+if (hevcP010.supported) {
+    // HEVC/P010 のMedia Foundation encoder MFTが見つかった
+}
+```
+
+---
+
 ## D3D12VideoEncoder について
 
 `D3D12VideoEncoder` はD3D11版から完全に分離されています。
@@ -212,11 +242,17 @@ HResult
 EncodeJobQueue
 D3D12UnsupportedBackend
 D3D11EncodeSmoke
+D3D11EncodeAsyncSmoke
+D3D11MediaFoundationCapabilities
 ```
 
 `D3D11EncodeSmoke` は、D3D11Helperで作成した `BGRA8` textureを `D3D11VideoEncoder` に渡し、Media Foundation backendで H.264 MP4 を生成します。その後、生成されたMP4を Media Foundation Source Reader で読み返し、動画streamの幅・高さ・sample数を検証します。
 
-このテストは実際にD3D11 GPU処理、D3D11Processingによる `BGRA8 -> NV12` 変換、Media Foundation Sink Writer、Source Reader readback を通るため、`dxcompiler.dll` / `dxil.dll` と Media Foundation H.264 encoder が必要です。
+`D3D11EncodeAsyncSmoke` は同じ実動画出力を `asyncMode=true` / `queueDepth=2` で実行し、worker thread 経由の書き込みと `close()` 時のflushを検証します。
+
+`D3D11MediaFoundationCapabilities` は、H.264/NV12、HEVC/NV12、HEVC/P010、AV1/NV12、AV1/P010 のMedia Foundation encoder MFTを列挙します。H.264/NV12は必須として検証し、HEVC/P010は環境依存のため対応可否を表示します。
+
+これらの実エンコードテストは、実際にD3D11 GPU処理、D3D11Processingによる `BGRA8 -> NV12` 変換、Media Foundation Sink Writer、Source Reader readback を通るため、`dxcompiler.dll` / `dxil.dll` と Media Foundation H.264 encoder が必要です。
 
 ---
 
@@ -272,8 +308,8 @@ git push
 
 優先順位は以下です。
 
-1. D3D11 + Media Foundation の実機検証強化
-2. D3D11 HEVC/P010の環境別検証
+1. D3D11 surface pool / async queue の細部強化
+2. HEVC/P010 実エンコードテストの条件付き追加
 3. NVENC D3D11 backend
 4. NvencD3D12 backend
 5. native D3D12 Video Encode backend

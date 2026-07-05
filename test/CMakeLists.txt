@@ -6,6 +6,8 @@ set(D3DVIDEOENCODER_TEST_TARGETS
     D3DVideoEncoder_test_encode_job_queue
     D3DVideoEncoder_test_d3d12_unsupported_backend
     D3DVideoEncoder_test_d3d11_encode_smoke
+    D3DVideoEncoder_test_d3d11_encode_async_smoke
+    D3DVideoEncoder_test_d3d11_mf_capabilities
 )
 
 add_executable(D3DVideoEncoder_test_timestamp_generator
@@ -56,6 +58,20 @@ target_include_directories(D3DVideoEncoder_test_d3d11_encode_smoke PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}"
 )
 
+add_executable(D3DVideoEncoder_test_d3d11_encode_async_smoke
+    test_d3d11_encode_async_smoke.cpp
+)
+target_link_libraries(D3DVideoEncoder_test_d3d11_encode_async_smoke PRIVATE D3DVideoEncoder::D3DVideoEncoder)
+target_include_directories(D3DVideoEncoder_test_d3d11_encode_async_smoke PRIVATE
+    "${PROJECT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_BINARY_DIR}"
+)
+
+add_executable(D3DVideoEncoder_test_d3d11_mf_capabilities
+    test_d3d11_mf_capabilities.cpp
+)
+target_link_libraries(D3DVideoEncoder_test_d3d11_mf_capabilities PRIVATE D3DVideoEncoder::D3DVideoEncoder)
+
 if(MSVC)
     foreach(tgt IN LISTS D3DVIDEOENCODER_TEST_TARGETS)
         target_compile_options(${tgt} PRIVATE /utf-8 /EHsc)
@@ -73,4 +89,7 @@ add_test(NAME HResult COMMAND D3DVideoEncoder_test_hresult)
 add_test(NAME EncodeJobQueue COMMAND D3DVideoEncoder_test_encode_job_queue)
 add_test(NAME D3D12UnsupportedBackend COMMAND D3DVideoEncoder_test_d3d12_unsupported_backend)
 add_test(NAME D3D11EncodeSmoke COMMAND D3DVideoEncoder_test_d3d11_encode_smoke)
+add_test(NAME D3D11EncodeAsyncSmoke COMMAND D3DVideoEncoder_test_d3d11_encode_async_smoke)
+add_test(NAME D3D11MediaFoundationCapabilities COMMAND D3DVideoEncoder_test_d3d11_mf_capabilities)
 set_tests_properties(D3D11EncodeSmoke PROPERTIES WORKING_DIRECTORY "$<TARGET_FILE_DIR:D3DVideoEncoder_test_d3d11_encode_smoke>")
+set_tests_properties(D3D11EncodeAsyncSmoke PROPERTIES WORKING_DIRECTORY "$<TARGET_FILE_DIR:D3DVideoEncoder_test_d3d11_encode_async_smoke>")
