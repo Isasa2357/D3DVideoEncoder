@@ -1,0 +1,63 @@
+# Build outputs
+/out/
+/build/
+/cmake-build-*/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/CTestTestfile.cmake
+/Testing/
+
+# FetchContent / dependency build directories
+/_deps/
+
+# Visual Studio / MSBuild
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.opensdf
+*.sdf
+*.suo
+*.user
+*.userosscache
+*.VC.db
+*.VC.VC.opendb
+ipch/
+
+# Compiled artifacts
+*.obj
+*.pch
+*.pdb
+*.idb
+*.ilk
+*.lib
+*.exp
+*.dll
+*.exe
+*.app
+*.log
+
+# Generated videos / test artifacts
+*.mp4
+*.mkv
+*.avi
+*.h264
+*.h265
+*.hevc
+*.ivf
+*.yuv
+*.rgba
+
+# Editor / OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Local scratch
+*.tmp
+*.bak
