@@ -202,7 +202,7 @@ ID3D12Resource
 
 ## テスト
 
-現在のテストは、D3D12動画出力ではなく、D3D12 backend が未実装として明示的に失敗することを確認します。
+現在のテストは、共通ユーティリティ、D3D12 backend の未実装状態、D3D11 実エンコード経路を確認します。
 
 ```text
 TimestampGenerator
@@ -211,7 +211,12 @@ DescValidation
 HResult
 EncodeJobQueue
 D3D12UnsupportedBackend
+D3D11EncodeSmoke
 ```
+
+`D3D11EncodeSmoke` は、D3D11Helperで作成した `BGRA8` textureを `D3D11VideoEncoder` に渡し、Media Foundation backendで H.264 MP4 を生成します。その後、生成されたMP4を Media Foundation Source Reader で読み返し、動画streamの幅・高さ・sample数を検証します。
+
+このテストは実際にD3D11 GPU処理、D3D11Processingによる `BGRA8 -> NV12` 変換、Media Foundation Sink Writer、Source Reader readback を通るため、`dxcompiler.dll` / `dxil.dll` と Media Foundation H.264 encoder が必要です。
 
 ---
 
