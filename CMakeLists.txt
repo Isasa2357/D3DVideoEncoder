@@ -20,6 +20,7 @@ set(D3DVIDEOENCODER_D3D11HELPER_GIT_TAG "main" CACHE STRING "D3D11Helper Git tag
 set(D3DVIDEOENCODER_D3D12HELPER_GIT_TAG "main" CACHE STRING "D3D12Helper Git tag/branch/commit")
 
 set(D3DVIDEOENCODER_D3D11_PROCESSING_SHADER_DIR "" CACHE PATH "D3D11Processing shader directory. Auto-detected from D3D11Helper when empty.")
+set(D3DVIDEOENCODER_D3D12_PROCESSING_SHADER_DIR "" CACHE PATH "D3D12Processing shader directory. Auto-detected from D3D12Helper when empty.")
 set(D3DVIDEOENCODER_DXC_RUNTIME_DIR "" CACHE PATH "Directory containing dxcompiler.dll and dxil.dll. Needed for samples/tests that use runtime shader compilation.")
 set(D3DVIDEOENCODER_NVENC_INCLUDE_DIR "" CACHE PATH "Directory containing NVIDIA Video Codec SDK Interface/nvEncodeAPI.h or nvEncodeAPI.h.")
 
@@ -95,7 +96,18 @@ if(NOT D3DVIDEOENCODER_D3D11_PROCESSING_SHADER_DIR)
     endif()
 endif()
 
+if(NOT D3DVIDEOENCODER_D3D12_PROCESSING_SHADER_DIR)
+    if(DEFINED d3d12helper_SOURCE_DIR)
+        set(D3DVIDEOENCODER_D3D12_PROCESSING_SHADER_DIR "${d3d12helper_SOURCE_DIR}/shaders/D3D12Processing" CACHE PATH "" FORCE)
+    elseif(DEFINED D3D12Helper_SOURCE_DIR)
+        set(D3DVIDEOENCODER_D3D12_PROCESSING_SHADER_DIR "${D3D12Helper_SOURCE_DIR}/shaders/D3D12Processing" CACHE PATH "" FORCE)
+    elseif(D3DVIDEOENCODER_D3D12HELPER_DIR)
+        set(D3DVIDEOENCODER_D3D12_PROCESSING_SHADER_DIR "${D3DVIDEOENCODER_D3D12HELPER_DIR}/shaders/D3D12Processing" CACHE PATH "" FORCE)
+    endif()
+endif()
+
 message(STATUS "D3D11Processing shaders: ${D3DVIDEOENCODER_D3D11_PROCESSING_SHADER_DIR}")
+message(STATUS "D3D12Processing shaders: ${D3DVIDEOENCODER_D3D12_PROCESSING_SHADER_DIR}")
 message(STATUS "D3D12 MediaFoundation backend: postponed / not built")
 
 set(D3DVIDEOENCODER_HAS_NVENC OFF)
@@ -126,6 +138,12 @@ if(D3DVIDEOENCODER_ENABLE_NVENC)
     message(STATUS "D3DVideoEncoder: NVENC enabled, nvEncodeAPI.h: ${D3DVIDEOENCODER_NVENC_RESOLVED_INCLUDE_DIR}")
 else()
     message(STATUS "D3DVideoEncoder: NVENC disabled. Enable with -DD3DVIDEOENCODER_ENABLE_NVENC=ON and set D3DVIDEOENCODER_NVENC_INCLUDE_DIR.")
+endif()
+
+if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
+    message(STATUS "D3DVideoEncoder: native D3D12 Video Encode backend scaffold enabled")
+else()
+    message(STATUS "D3DVideoEncoder: native D3D12 Video Encode backend disabled")
 endif()
 
 set(D3DVIDEOENCODER_PUBLIC_HEADERS
@@ -186,6 +204,16 @@ if(D3DVIDEOENCODER_HAS_NVENC)
     )
 endif()
 
+if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
+    list(APPEND D3DVIDEOENCODER_PRIVATE_HEADERS
+        src/backend/d3d12video/ID3D12VideoEncodeBackend.hpp
+        src/backend/d3d12video/D3D12VideoEncodeBackend.hpp
+    )
+    list(APPEND D3DVIDEOENCODER_SOURCES
+        src/backend/d3d12video/D3D12VideoEncodeBackend.cpp
+    )
+endif()
+
 
 add_library(D3DVideoEncoder STATIC
     ${D3DVIDEOENCODER_PUBLIC_HEADERS}
@@ -204,6 +232,10 @@ target_include_directories(D3DVideoEncoder
 if(D3DVIDEOENCODER_HAS_NVENC)
     target_include_directories(D3DVideoEncoder PRIVATE "${D3DVIDEOENCODER_NVENC_RESOLVED_INCLUDE_DIR}")
     target_compile_definitions(D3DVideoEncoder PRIVATE D3DVIDEOENCODER_HAS_NVENC=1)
+endif()
+
+if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
+    target_compile_definitions(D3DVideoEncoder PRIVATE D3DVIDEOENCODER_HAS_D3D12_VIDEO_ENCODE=1)
 endif()
 
 target_compile_definitions(D3DVideoEncoder

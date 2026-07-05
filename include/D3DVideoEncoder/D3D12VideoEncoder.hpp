@@ -10,8 +10,9 @@ namespace D3DVideoEncoderLib {
 class D3D12VideoEncoder {
 public:
     // This class is intentionally separated from D3D11VideoEncoder.
-    // Current package exposes validation and explicit unsupported-backend errors only.
-    // Actual D3D12 encoding will be implemented through NvencD3D12 or native D3D12 Video Encode.
+    // D3D12 output is handled by D3D12-native backends. NvencD3D12 can encode
+    // NV12/P010 directly and can optionally use D3D12Processing for RGB -> NV12/P010.
+    // Native D3D12 Video Encode is exposed as an experimental backend scaffold.
     explicit D3D12VideoEncoder(const D3D12VideoEncoderDesc& desc);
     ~D3D12VideoEncoder();
 

@@ -5,6 +5,9 @@
 #ifdef D3DVIDEOENCODER_HAS_NVENC
 #include "backend/nvenc/NvencD3D12EncoderBackend.hpp"
 #endif
+#ifdef D3DVIDEOENCODER_HAS_D3D12_VIDEO_ENCODE
+#include "backend/d3d12video/D3D12VideoEncodeBackend.hpp"
+#endif
 
 #include <string>
 
@@ -24,6 +27,15 @@ D3D12VideoEncoder::Impl::Impl(const D3D12VideoEncoderDesc& desc)
     if (desc_.backend == D3DVideoEncoderBackendType::NvencD3D12) {
         nvencBackend_ = createNvencD3D12Backend();
         nvencBackend_->initialize(desc_);
+        open_ = true;
+        return;
+    }
+#endif
+
+#ifdef D3DVIDEOENCODER_HAS_D3D12_VIDEO_ENCODE
+    if (desc_.backend == D3DVideoEncoderBackendType::D3D12VideoEncode) {
+        d3d12VideoEncodeBackend_ = createD3D12VideoEncodeBackend();
+        d3d12VideoEncodeBackend_->initialize(desc_);
         open_ = true;
         return;
     }
@@ -87,7 +99,9 @@ void D3D12VideoEncoder::Impl::throwBackendNotImplemented() const {
             "and a NVIDIA Video Codec SDK include directory.");
     case D3DVideoEncoderBackendType::D3D12VideoEncode:
         throw D3DVideoEncoderError(
-            "D3D12VideoEncoder native D3D12 Video Encode backend is planned but not implemented.");
+            "D3D12VideoEncoder native D3D12 Video Encode backend requires "
+            "D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE=ON. The current backend includes capability/open scaffolding; "
+            "bitstream output is still experimental.");
     case D3DVideoEncoderBackendType::NvencD3D11:
         throw D3DVideoEncoderError("NvencD3D11 is not a D3D12VideoEncoder backend.");
     default:
@@ -98,6 +112,12 @@ void D3D12VideoEncoder::Impl::throwBackendNotImplemented() const {
 #ifdef D3DVIDEOENCODER_HAS_NVENC
 std::unique_ptr<INvencD3D12EncoderBackend> D3D12VideoEncoder::Impl::createNvencD3D12Backend() {
     return std::make_unique<NvencD3D12EncoderBackend>(log_);
+}
+#endif
+
+#ifdef D3DVIDEOENCODER_HAS_D3D12_VIDEO_ENCODE
+std::unique_ptr<ID3D12VideoEncodeBackend> D3D12VideoEncoder::Impl::createD3D12VideoEncodeBackend() {
+    return std::make_unique<D3D12VideoEncodeBackend>(log_);
 }
 #endif
 
@@ -122,6 +142,14 @@ void D3D12VideoEncoder::Impl::write(ID3D12Resource* resource, D3D12_RESOURCE_STA
         return;
     }
 #endif
+#ifdef D3DVIDEOENCODER_HAS_D3D12_VIDEO_ENCODE
+    if (d3d12VideoEncodeBackend_) {
+        d3d12VideoEncodeBackend_->encode(resource, currentState, timestamp100ns, timestampGenerator_.frameDuration100ns());
+        lastTimestamp100ns_ = timestamp100ns;
+        ++writtenFrameCount_;
+        return;
+    }
+#endif
 
     throwBackendNotImplemented();
 }
@@ -132,6 +160,11 @@ void D3D12VideoEncoder::Impl::flush() {
         nvencBackend_->flush();
     }
 #endif
+#ifdef D3DVIDEOENCODER_HAS_D3D12_VIDEO_ENCODE
+    if (d3d12VideoEncodeBackend_) {
+        d3d12VideoEncodeBackend_->flush();
+    }
+#endif
 }
 
 void D3D12VideoEncoder::Impl::close() {
@@ -139,6 +172,11 @@ void D3D12VideoEncoder::Impl::close() {
 #ifdef D3DVIDEOENCODER_HAS_NVENC
     if (nvencBackend_) {
         nvencBackend_->close();
+    }
+#endif
+#ifdef D3DVIDEOENCODER_HAS_D3D12_VIDEO_ENCODE
+    if (d3d12VideoEncodeBackend_) {
+        d3d12VideoEncodeBackend_->close();
     }
 #endif
     open_ = false;

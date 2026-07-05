@@ -8,6 +8,9 @@
 #ifdef D3DVIDEOENCODER_HAS_NVENC
 #include "backend/nvenc/INvencD3D12EncoderBackend.hpp"
 #endif
+#ifdef D3DVIDEOENCODER_HAS_D3D12_VIDEO_ENCODE
+#include "backend/d3d12video/ID3D12VideoEncodeBackend.hpp"
+#endif
 
 #include <memory>
 
@@ -33,12 +36,18 @@ private:
 #ifdef D3DVIDEOENCODER_HAS_NVENC
     std::unique_ptr<INvencD3D12EncoderBackend> createNvencD3D12Backend();
 #endif
+#ifdef D3DVIDEOENCODER_HAS_D3D12_VIDEO_ENCODE
+    std::unique_ptr<ID3D12VideoEncodeBackend> createD3D12VideoEncodeBackend();
+#endif
 
     D3D12VideoEncoderDesc desc_ = {};
     DebugLog log_;
     TimestampGenerator timestampGenerator_;
 #ifdef D3DVIDEOENCODER_HAS_NVENC
     std::unique_ptr<INvencD3D12EncoderBackend> nvencBackend_;
+#endif
+#ifdef D3DVIDEOENCODER_HAS_D3D12_VIDEO_ENCODE
+    std::unique_ptr<ID3D12VideoEncodeBackend> d3d12VideoEncodeBackend_;
 #endif
     bool open_ = false;
     uint64_t writtenFrameCount_ = 0;
