@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <d3d11.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -55,6 +56,39 @@ enum class EncoderQueueFullPolicy {
     Block,
     DropNewest,
     DropOldest,
+};
+
+
+struct NvencFormatCapability {
+    VideoCodec codec = VideoCodec::H264;
+    VideoPixelFormat inputFormat = VideoPixelFormat::NV12;
+
+    bool runtimeAvailable = false;
+    bool deviceSupported = false;
+    bool codecSupported = false;
+    bool inputFormatSupported = false;
+    bool supported = false;
+
+    uint32_t maxWidth = 0;
+    uint32_t maxHeight = 0;
+
+    std::string message;
+
+    bool canEncode() const noexcept { return supported; }
+};
+
+struct NvencCapabilities {
+    NvencFormatCapability h264Nv12;
+    NvencFormatCapability hevcNv12;
+    NvencFormatCapability hevcP010;
+    NvencFormatCapability av1Nv12;
+    NvencFormatCapability av1P010;
+
+    bool supportsH264Nv12() const noexcept { return h264Nv12.supported; }
+    bool supportsHevcNv12() const noexcept { return hevcNv12.supported; }
+    bool supportsHevcP010() const noexcept { return hevcP010.supported; }
+    bool supportsAv1Nv12() const noexcept { return av1Nv12.supported; }
+    bool supportsAv1P010() const noexcept { return av1P010.supported; }
 };
 
 inline DXGI_FORMAT ToDxgiFormat(VideoPixelFormat format) noexcept {

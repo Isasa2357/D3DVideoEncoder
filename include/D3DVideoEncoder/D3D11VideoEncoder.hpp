@@ -9,6 +9,7 @@
 
 namespace D3DVideoEncoderLib {
 
+
 struct D3D11MediaFoundationFormatCapability {
     VideoCodec codec = VideoCodec::H264;
     VideoPixelFormat inputFormat = VideoPixelFormat::NV12;
@@ -73,6 +74,15 @@ public:
         VideoCodec codec,
         VideoPixelFormat inputFormat);
     static D3D11MediaFoundationCapabilities QueryMediaFoundationCapabilities();
+
+    // Query NVENC support on the D3D11 device. This works only when the library
+    // was built with D3DVIDEOENCODER_ENABLE_NVENC=ON; otherwise supported=false
+    // is returned with an explanatory message.
+    static NvencFormatCapability QueryNvencSupport(
+        D3D11CoreLib::D3D11Core* core,
+        VideoCodec codec,
+        VideoPixelFormat inputFormat);
+    static NvencCapabilities QueryNvencCapabilities(D3D11CoreLib::D3D11Core* core);
 
 private:
     class Impl;

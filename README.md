@@ -26,8 +26,8 @@
 | async write | 対応。実動画テスト追加済み |
 | D3D12入力API | D3D11版から分離済み |
 | D3D12 + Media Foundation | 未対応。将来実装 |
-| NVENC D3D11 | `D3DVIDEOENCODER_ENABLE_NVENC=ON` 時に対応。elementary stream出力 |
-| NVENC D3D12 | `D3DVIDEOENCODER_ENABLE_NVENC=ON` 時に対応。NV12/P010直接入力、またはD3D12ProcessingによるRGB→NV12/P010変換 |
+| NVENC D3D11 | `D3DVIDEOENCODER_ENABLE_NVENC=ON` 時に対応。`.h264` / `.h265` elementary stream と `.mp4` / `.mkv` mux出力に対応 |
+| NVENC D3D12 | `D3DVIDEOENCODER_ENABLE_NVENC=ON` 時に対応。NV12/P010直接入力、またはD3D12ProcessingによるRGB→NV12/P010変換。`.h264` / `.h265` / `.mp4` / `.mkv` 出力に対応 |
 | native D3D12 Video Encode | `D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE=ON` 時にbackend scaffoldをビルド。実フレームエンコード/bitstream出力は未完了 |
 | AV1 | NVENC SDK/GPU依存。初期実装ではH.264/HEVCを主対象 |
 
@@ -219,14 +219,15 @@ ctest --test-dir out/build/default -C Release --output-on-failure
 set "NV_CODEC_SDK_ROOT=C:/SDK/Video_Codec_SDK"
 ```
 
-現在のNVENC backendは、Media Foundation Sink WriterではなくNVENCから得た圧縮bitstreamをそのままファイルへ書き出します。そのため、出力拡張子は以下を推奨します。
+現在のNVENC backendは、NVENCから得た圧縮bitstreamを内部muxerへ渡します。出力拡張子に応じて以下を選びます。
 
 ```text
-H.264: .h264
-HEVC : .h265
+.h264 / .h265 : elementary stream
+.mp4          : minimal MP4 mux
+.mkv          : minimal Matroska mux
 ```
 
-MP4/MKV muxは次の実装段階です。
+MP4/MKV muxはH.264/HEVCを対象にします。AV1 muxは今後の実装対象です。
 
 ---
 
@@ -234,7 +235,7 @@ MP4/MKV muxは次の実装段階です。
 
 ```cpp
 D3D11VideoEncoderDesc desc;
-desc.outputPath = L"output.h264";
+desc.outputPath = L"output.mp4";
 desc.width = width;
 desc.height = height;
 desc.frameRateNum = 60;
@@ -263,7 +264,7 @@ encoder.close();
 
 ```cpp
 D3D12VideoEncoderDesc desc;
-desc.outputPath = L"output.h264";
+desc.outputPath = L"output.mp4";
 desc.width = width;
 desc.height = height;
 desc.frameRateNum = 60;
@@ -284,7 +285,7 @@ encoder.close();
 現在の制約です。
 
 ```text
-- 出力は .h264 / .h265 の elementary stream
+- 出力は .h264 / .h265 の elementary stream、または .mp4 / .mkv mux
 - D3D12Processingを使う場合、内部でDirectQueueへ変換コマンドを投入し、NVENC投入前にfence待ちする
 - 入力がNV12/P010直接入力の場合、resource state は D3D12_RESOURCE_STATE_COMMON を要求
 - 入力がRGB系の場合、write()へ渡された currentState から変換し、変換後scratchをCOMMONでNVENCへ渡す
@@ -349,6 +350,19 @@ D3D11MediaFoundationCapabilities
 
 `D3D11MediaFoundationCapabilities` は、H.264/NV12、HEVC/NV12、HEVC/P010、AV1/NV12、AV1/P010 のMedia Foundation encoder MFTを列挙します。H.264/NV12は必須として検証し、HEVC/P010は環境依存のため対応可否を表示します。
 
+### Optional NVENC / HEVC tests
+
+`D3DVIDEOENCODER_ENABLE_NVENC=ON` の場合、以下のNVENCテストも追加されます。NVENC runtimeや対応GPUがない場合はskipします。
+
+```text
+NvencCapabilities
+NvencD3D11H264Mp4Smoke
+NvencD3D12RgbaH264Mp4Smoke
+```
+
+また、通常テストに `D3D11HevcP010Smoke` を追加しています。これはMedia Foundation capability queryでHEVC/P010 encoderが見つかる環境だけ実エンコードを行い、未対応環境ではskipします。
+
+
 これらの実エンコードテストは、実際にD3D11 GPU処理、D3D11Processingによる `BGRA8 -> NV12` 変換、Media Foundation Sink Writer、Source Reader readback を通るため、`dxcompiler.dll` / `dxil.dll` と Media Foundation H.264 encoder が必要です。
 
 ---
@@ -411,7 +425,7 @@ git push
 4. NvencD3D12 backend
 5. D3D12Processing + NvencD3D12 接続
 6. native D3D12 Video Encode backend の実フレームエンコード/bitstream出力
-7. MP4/MKV mux
+7. NVENC resource/register pool化
 8. D3D12 + Media Foundation backend の再検討
 
 

@@ -62,17 +62,21 @@ int main() {
         D3D12VideoEncoder encoder(desc);
     }, "postponed");
 
+#ifndef D3DVIDEOENCODER_TEST_HAS_NVENC
     expect_encoder_error("d3d12 nvenc planned", [] {
         auto desc = valid_d3d12_desc();
         desc.backend = D3DVideoEncoderBackendType::NvencD3D12;
         D3D12VideoEncoder encoder(desc);
     }, "NvencD3D12");
+#endif
 
+#ifndef D3DVIDEOENCODER_TEST_HAS_D3D12_VIDEO_ENCODE
     expect_encoder_error("d3d12 native planned", [] {
         auto desc = valid_d3d12_desc();
         desc.backend = D3DVideoEncoderBackendType::D3D12VideoEncode;
         D3D12VideoEncoder encoder(desc);
     }, "D3D12 Video Encode");
+#endif
 
     expect_encoder_error("legacy wrapper d3d12 mf postponed", [] {
         D3DVideoEncoderDesc desc;

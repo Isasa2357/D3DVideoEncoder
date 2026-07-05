@@ -2,6 +2,10 @@
 
 #include "D3D11VideoEncoderImpl.hpp"
 
+#ifdef D3DVIDEOENCODER_HAS_NVENC
+#include "backend/nvenc/NvencCommon.hpp"
+#endif
+
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfobjects.h>
@@ -218,6 +222,37 @@ D3D11MediaFoundationFormatCapability D3D11VideoEncoder::QueryMediaFoundationSupp
 
     MFShutdown();
     return result;
+}
+
+
+NvencFormatCapability D3D11VideoEncoder::QueryNvencSupport(
+    D3D11CoreLib::D3D11Core* core,
+    VideoCodec codec,
+    VideoPixelFormat inputFormat) {
+
+    NvencFormatCapability result;
+    result.codec = codec;
+    result.inputFormat = inputFormat;
+#ifdef D3DVIDEOENCODER_HAS_NVENC
+    if (!core) {
+        result.message = "D3D11VideoEncoder::QueryNvencSupport requires a non-null D3D11Core.";
+        return result;
+    }
+    return QueryNvencDeviceSupport(core->GetDevice(), NV_ENC_DEVICE_TYPE_DIRECTX, codec, inputFormat);
+#else
+    result.message = "D3DVideoEncoder was built without D3DVIDEOENCODER_ENABLE_NVENC=ON.";
+    return result;
+#endif
+}
+
+NvencCapabilities D3D11VideoEncoder::QueryNvencCapabilities(D3D11CoreLib::D3D11Core* core) {
+    NvencCapabilities caps;
+    caps.h264Nv12 = QueryNvencSupport(core, VideoCodec::H264, VideoPixelFormat::NV12);
+    caps.hevcNv12 = QueryNvencSupport(core, VideoCodec::HEVC, VideoPixelFormat::NV12);
+    caps.hevcP010 = QueryNvencSupport(core, VideoCodec::HEVC, VideoPixelFormat::P010);
+    caps.av1Nv12 = QueryNvencSupport(core, VideoCodec::AV1, VideoPixelFormat::NV12);
+    caps.av1P010 = QueryNvencSupport(core, VideoCodec::AV1, VideoPixelFormat::P010);
+    return caps;
 }
 
 D3D11MediaFoundationCapabilities D3D11VideoEncoder::QueryMediaFoundationCapabilities() {

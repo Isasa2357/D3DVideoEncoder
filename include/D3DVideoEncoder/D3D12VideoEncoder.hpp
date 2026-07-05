@@ -31,6 +31,15 @@ public:
     bool isOpen() const noexcept;
     uint64_t writtenFrameCount() const noexcept;
 
+    // Query NVENC support on the D3D12 device. This works only when the library
+    // was built with D3DVIDEOENCODER_ENABLE_NVENC=ON; otherwise supported=false
+    // is returned with an explanatory message.
+    static NvencFormatCapability QueryNvencSupport(
+        D3D12CoreLib::D3D12Core* core,
+        VideoCodec codec,
+        VideoPixelFormat inputFormat);
+    static NvencCapabilities QueryNvencCapabilities(D3D12CoreLib::D3D12Core* core);
+
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;

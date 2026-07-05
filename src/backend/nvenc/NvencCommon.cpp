@@ -1,5 +1,6 @@
 #include "backend/nvenc/NvencCommon.hpp"
 
+#include <algorithm>
 #include <exception>
 #include <filesystem>
 #include <sstream>
@@ -86,6 +87,131 @@ void NvencApi::load() {
     functions_ = {};
     functions_.version = NV_ENCODE_API_FUNCTION_LIST_VER;
     D3DVE_THROW_IF_NVENC_FAILED_MSG(createInstance(&functions_), "NvEncodeAPICreateInstance");
+}
+
+
+namespace {
+
+GUID QueryCodecGuid(VideoCodec codec, std::string& error) {
+    switch (codec) {
+    case VideoCodec::H264: return NV_ENC_CODEC_H264_GUID;
+    case VideoCodec::HEVC: return NV_ENC_CODEC_HEVC_GUID;
+    case VideoCodec::AV1:
+#ifdef NV_ENC_CODEC_AV1_GUID
+        return NV_ENC_CODEC_AV1_GUID;
+#else
+        error = "This nvEncodeAPI.h does not define AV1 encode support.";
+        return GUID_NULL;
+#endif
+    default:
+        error = "Unsupported NVENC codec.";
+        return GUID_NULL;
+    }
+}
+
+NV_ENC_BUFFER_FORMAT QueryBufferFormat(VideoPixelFormat format, std::string& error) {
+    switch (format) {
+    case VideoPixelFormat::NV12: return NV_ENC_BUFFER_FORMAT_NV12;
+    case VideoPixelFormat::P010: return NV_ENC_BUFFER_FORMAT_YUV420_10BIT;
+    default:
+        error = "NVENC capability query requires NV12 or P010 input format.";
+        return static_cast<NV_ENC_BUFFER_FORMAT>(0);
+    }
+}
+
+bool GuidEqual(const GUID& a, const GUID& b) noexcept {
+    return IsEqualGUID(a, b) != FALSE;
+}
+
+} // namespace
+
+NvencFormatCapability QueryNvencDeviceSupport(void* device, NV_ENC_DEVICE_TYPE deviceType, VideoCodec codec, VideoPixelFormat inputFormat) {
+    NvencFormatCapability result;
+    result.codec = codec;
+    result.inputFormat = inputFormat;
+
+    std::string error;
+    const GUID codecGuid = QueryCodecGuid(codec, error);
+    const NV_ENC_BUFFER_FORMAT bufferFormat = QueryBufferFormat(inputFormat, error);
+    if (!error.empty()) {
+        result.message = error;
+        return result;
+    }
+    if (!device) {
+        result.message = "Null D3D device.";
+        return result;
+    }
+
+    NvencApi api;
+    try {
+        api.load();
+        result.runtimeAvailable = true;
+    } catch (const std::exception& e) {
+        result.message = e.what();
+        return result;
+    }
+
+    NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS openParams = {};
+    openParams.version = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
+    openParams.device = device;
+    openParams.deviceType = deviceType;
+    openParams.apiVersion = NVENCAPI_VERSION;
+    void* encoder = nullptr;
+    const NVENCSTATUS openStatus = api.functions().nvEncOpenEncodeSessionEx(&openParams, &encoder);
+    if (openStatus != NV_ENC_SUCCESS || !encoder) {
+        result.message = std::string("nvEncOpenEncodeSessionEx failed: ") + NvencStatusToString(openStatus);
+        return result;
+    }
+    result.deviceSupported = true;
+
+    try {
+        uint32_t guidCount = 0;
+        D3DVE_THROW_IF_NVENC_FAILED_MSG(api.functions().nvEncGetEncodeGUIDCount(encoder, &guidCount), "NVENC capability query: nvEncGetEncodeGUIDCount");
+        std::vector<GUID> guids(guidCount);
+        uint32_t writtenGuids = 0;
+        if (guidCount > 0) {
+            D3DVE_THROW_IF_NVENC_FAILED_MSG(api.functions().nvEncGetEncodeGUIDs(encoder, guids.data(), guidCount, &writtenGuids), "NVENC capability query: nvEncGetEncodeGUIDs");
+        }
+        result.codecSupported = std::any_of(guids.begin(), guids.begin() + writtenGuids, [&](const GUID& g) { return GuidEqual(g, codecGuid); });
+        if (!result.codecSupported) {
+            result.message = "NVENC codec is not supported on this device.";
+            api.functions().nvEncDestroyEncoder(encoder);
+            return result;
+        }
+
+        uint32_t formatCount = 0;
+        D3DVE_THROW_IF_NVENC_FAILED_MSG(api.functions().nvEncGetInputFormatCount(encoder, codecGuid, &formatCount), "NVENC capability query: nvEncGetInputFormatCount");
+        std::vector<NV_ENC_BUFFER_FORMAT> formats(formatCount);
+        uint32_t writtenFormats = 0;
+        if (formatCount > 0) {
+            D3DVE_THROW_IF_NVENC_FAILED_MSG(api.functions().nvEncGetInputFormats(encoder, codecGuid, formats.data(), formatCount, &writtenFormats), "NVENC capability query: nvEncGetInputFormats");
+        }
+        result.inputFormatSupported = std::any_of(formats.begin(), formats.begin() + writtenFormats, [&](NV_ENC_BUFFER_FORMAT f) { return f == bufferFormat; });
+        if (!result.inputFormatSupported) {
+            result.message = "NVENC input format is not supported for this codec on this device.";
+            api.functions().nvEncDestroyEncoder(encoder);
+            return result;
+        }
+
+        NV_ENC_CAPS_PARAM caps = {};
+        caps.version = NV_ENC_CAPS_PARAM_VER;
+        int value = 0;
+        caps.capsToQuery = NV_ENC_CAPS_WIDTH_MAX;
+        if (api.functions().nvEncGetEncodeCaps(encoder, codecGuid, &caps, &value) == NV_ENC_SUCCESS && value > 0) {
+            result.maxWidth = static_cast<uint32_t>(value);
+        }
+        caps.capsToQuery = NV_ENC_CAPS_HEIGHT_MAX;
+        if (api.functions().nvEncGetEncodeCaps(encoder, codecGuid, &caps, &value) == NV_ENC_SUCCESS && value > 0) {
+            result.maxHeight = static_cast<uint32_t>(value);
+        }
+        result.supported = true;
+        result.message = "NVENC codec/input format is supported.";
+    } catch (const std::exception& e) {
+        result.message = e.what();
+    }
+
+    api.functions().nvEncDestroyEncoder(encoder);
+    return result;
 }
 
 NvencEncoderSession::~NvencEncoderSession() {
@@ -241,10 +367,7 @@ void NvencEncoderSession::initialize(void* device, NV_ENC_DEVICE_TYPE deviceType
 
     D3DVE_THROW_IF_NVENC_FAILED_MSG(api_.functions().nvEncInitializeEncoder(encoder_, &init), describe() + ": nvEncInitializeEncoder");
 
-    output_.open(std::filesystem::path(desc_.outputPath), std::ios::binary | std::ios::trunc);
-    if (!output_) {
-        throw D3DVideoEncoderError(describe() + ": failed to open output elementary stream file.");
-    }
+    muxer_.open(desc_.outputPath, desc_.width, desc_.height, desc_.frameRateNum, desc_.frameRateDen, desc_.codec);
 
     createBitstreamBuffer();
 }
@@ -272,10 +395,11 @@ void NvencEncoderSession::writeBitstream(void* bitstreamBuffer) {
 
     try {
         if (lock.bitstreamBufferPtr && lock.bitstreamSizeInBytes > 0) {
-            output_.write(static_cast<const char*>(lock.bitstreamBufferPtr), static_cast<std::streamsize>(lock.bitstreamSizeInBytes));
-            if (!output_) {
-                throw D3DVideoEncoderError(describe() + ": failed to write NVENC bitstream file.");
-            }
+            muxer_.writeAccessUnit(
+                static_cast<const uint8_t*>(lock.bitstreamBufferPtr),
+                static_cast<size_t>(lock.bitstreamSizeInBytes),
+                currentTimestamp100ns_,
+                currentDuration100ns_);
         }
     } catch (...) {
         api_.functions().nvEncUnlockBitstream(encoder_, bitstreamBuffer);
@@ -325,6 +449,8 @@ void NvencEncoderSession::encodeDirectXResource(void* resource, int64_t timestam
         pic.inputTimeStamp = static_cast<uint64_t>(timestamp100ns);
         (void)duration100ns;
 
+        currentTimestamp100ns_ = timestamp100ns;
+        currentDuration100ns_ = duration100ns;
         const NVENCSTATUS encodeStatus = api_.functions().nvEncEncodePicture(encoder_, &pic);
         if (encodeStatus != NV_ENC_SUCCESS && encodeStatus != NV_ENC_ERR_NEED_MORE_INPUT) {
             ThrowNvenc(encodeStatus, "nvEncEncodePicture", __FILE__, __LINE__, describe());
@@ -354,14 +480,21 @@ void NvencEncoderSession::flush() {
     NV_ENC_PIC_PARAMS eos = {};
     eos.version = NV_ENC_PIC_PARAMS_VER;
     eos.encodePicFlags = NV_ENC_PIC_FLAG_EOS;
+    eos.outputBitstream = bitstreamBuffer_;
     const NVENCSTATUS status = api_.functions().nvEncEncodePicture(encoder_, &eos);
     if (status != NV_ENC_SUCCESS && status != NV_ENC_ERR_NEED_MORE_INPUT) {
         ThrowNvenc(status, "nvEncEncodePicture(EOS)", __FILE__, __LINE__, describe());
     }
-    eosSent_ = true;
-    if (output_) {
-        output_.flush();
+    if (status == NV_ENC_SUCCESS) {
+        try {
+            writeBitstream(bitstreamBuffer_);
+        } catch (...) {
+            // Some drivers signal EOS without producing an extra output packet.
+            // Ignore empty/lock failures on EOS; previously encoded packets remain valid.
+        }
     }
+    eosSent_ = true;
+    muxer_.flush();
 }
 
 void NvencEncoderSession::close() {
@@ -380,9 +513,7 @@ void NvencEncoderSession::close() {
         api_.functions().nvEncDestroyEncoder(encoder_);
         encoder_ = nullptr;
     }
-    if (output_) {
-        output_.close();
-    }
+    muxer_.close();
 
     if (pending) {
         std::rethrow_exception(pending);

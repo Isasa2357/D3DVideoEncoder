@@ -193,12 +193,14 @@ set(D3DVIDEOENCODER_SOURCES
 if(D3DVIDEOENCODER_HAS_NVENC)
     list(APPEND D3DVIDEOENCODER_PRIVATE_HEADERS
         src/backend/nvenc/NvencCommon.hpp
+        src/backend/mux/NvencOutputMuxer.hpp
         src/backend/nvenc/NvencD3D11EncoderBackend.hpp
         src/backend/nvenc/INvencD3D12EncoderBackend.hpp
         src/backend/nvenc/NvencD3D12EncoderBackend.hpp
     )
     list(APPEND D3DVIDEOENCODER_SOURCES
         src/backend/nvenc/NvencCommon.cpp
+        src/backend/mux/NvencOutputMuxer.cpp
         src/backend/nvenc/NvencD3D11EncoderBackend.cpp
         src/backend/nvenc/NvencD3D12EncoderBackend.cpp
     )

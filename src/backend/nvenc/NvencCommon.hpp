@@ -5,6 +5,7 @@
 
 #include <Windows.h>
 #include <nvEncodeAPI.h>
+#include "backend/mux/NvencOutputMuxer.hpp"
 
 #include <cstdint>
 #include <fstream>
@@ -53,6 +54,8 @@ private:
     NV_ENCODE_API_FUNCTION_LIST functions_ = {};
 };
 
+NvencFormatCapability QueryNvencDeviceSupport(void* device, NV_ENC_DEVICE_TYPE deviceType, VideoCodec codec, VideoPixelFormat inputFormat);
+
 class NvencEncoderSession {
 public:
     NvencEncoderSession() = default;
@@ -84,8 +87,10 @@ private:
     NvencSessionDesc desc_ = {};
     void* encoder_ = nullptr;
     void* bitstreamBuffer_ = nullptr;
-    std::ofstream output_;
+    NvencOutputMuxer muxer_;
     bool eosSent_ = false;
+    int64_t currentTimestamp100ns_ = 0;
+    int64_t currentDuration100ns_ = 0;
 };
 
 } // namespace D3DVideoEncoderLib

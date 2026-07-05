@@ -2,6 +2,10 @@
 
 #include "D3D12VideoEncoderImpl.hpp"
 
+#ifdef D3DVIDEOENCODER_HAS_NVENC
+#include "backend/nvenc/NvencCommon.hpp"
+#endif
+
 namespace D3DVideoEncoderLib {
 
 D3D12VideoEncoder::D3D12VideoEncoder(const D3D12VideoEncoderDesc& desc)
@@ -33,6 +37,37 @@ bool D3D12VideoEncoder::isOpen() const noexcept {
 
 uint64_t D3D12VideoEncoder::writtenFrameCount() const noexcept {
     return impl_ ? impl_->writtenFrameCount() : 0;
+}
+
+
+NvencFormatCapability D3D12VideoEncoder::QueryNvencSupport(
+    D3D12CoreLib::D3D12Core* core,
+    VideoCodec codec,
+    VideoPixelFormat inputFormat) {
+
+    NvencFormatCapability result;
+    result.codec = codec;
+    result.inputFormat = inputFormat;
+#ifdef D3DVIDEOENCODER_HAS_NVENC
+    if (!core) {
+        result.message = "D3D12VideoEncoder::QueryNvencSupport requires a non-null D3D12Core.";
+        return result;
+    }
+    return QueryNvencDeviceSupport(core->GetDevice(), NV_ENC_DEVICE_TYPE_DIRECTX, codec, inputFormat);
+#else
+    result.message = "D3DVideoEncoder was built without D3DVIDEOENCODER_ENABLE_NVENC=ON.";
+    return result;
+#endif
+}
+
+NvencCapabilities D3D12VideoEncoder::QueryNvencCapabilities(D3D12CoreLib::D3D12Core* core) {
+    NvencCapabilities caps;
+    caps.h264Nv12 = QueryNvencSupport(core, VideoCodec::H264, VideoPixelFormat::NV12);
+    caps.hevcNv12 = QueryNvencSupport(core, VideoCodec::HEVC, VideoPixelFormat::NV12);
+    caps.hevcP010 = QueryNvencSupport(core, VideoCodec::HEVC, VideoPixelFormat::P010);
+    caps.av1Nv12 = QueryNvencSupport(core, VideoCodec::AV1, VideoPixelFormat::NV12);
+    caps.av1P010 = QueryNvencSupport(core, VideoCodec::AV1, VideoPixelFormat::P010);
+    return caps;
 }
 
 } // namespace D3DVideoEncoderLib
