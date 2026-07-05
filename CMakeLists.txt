@@ -21,6 +21,7 @@ set(D3DVIDEOENCODER_D3D12HELPER_GIT_TAG "main" CACHE STRING "D3D12Helper Git tag
 
 set(D3DVIDEOENCODER_D3D11_PROCESSING_SHADER_DIR "" CACHE PATH "D3D11Processing shader directory. Auto-detected from D3D11Helper when empty.")
 set(D3DVIDEOENCODER_DXC_RUNTIME_DIR "" CACHE PATH "Directory containing dxcompiler.dll and dxil.dll. Needed for samples/tests that use runtime shader compilation.")
+set(D3DVIDEOENCODER_NVENC_INCLUDE_DIR "" CACHE PATH "Directory containing NVIDIA Video Codec SDK Interface/nvEncodeAPI.h or nvEncodeAPI.h.")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -97,6 +98,36 @@ endif()
 message(STATUS "D3D11Processing shaders: ${D3DVIDEOENCODER_D3D11_PROCESSING_SHADER_DIR}")
 message(STATUS "D3D12 MediaFoundation backend: postponed / not built")
 
+set(D3DVIDEOENCODER_HAS_NVENC OFF)
+if(D3DVIDEOENCODER_ENABLE_NVENC)
+    set(_d3dve_nvenc_candidates)
+    if(D3DVIDEOENCODER_NVENC_INCLUDE_DIR)
+        list(APPEND _d3dve_nvenc_candidates "${D3DVIDEOENCODER_NVENC_INCLUDE_DIR}")
+    endif()
+    if(DEFINED ENV{NV_CODEC_SDK_ROOT})
+        file(TO_CMAKE_PATH "$ENV{NV_CODEC_SDK_ROOT}" _nv_codec_sdk_root)
+        list(APPEND _d3dve_nvenc_candidates
+            "${_nv_codec_sdk_root}/Interface"
+            "${_nv_codec_sdk_root}/include"
+            "${_nv_codec_sdk_root}")
+    endif()
+    find_path(D3DVIDEOENCODER_NVENC_RESOLVED_INCLUDE_DIR
+        NAMES nvEncodeAPI.h
+        PATHS ${_d3dve_nvenc_candidates}
+        NO_DEFAULT_PATH
+    )
+    if(NOT D3DVIDEOENCODER_NVENC_RESOLVED_INCLUDE_DIR)
+        find_path(D3DVIDEOENCODER_NVENC_RESOLVED_INCLUDE_DIR NAMES nvEncodeAPI.h)
+    endif()
+    if(NOT D3DVIDEOENCODER_NVENC_RESOLVED_INCLUDE_DIR)
+        message(FATAL_ERROR "D3DVIDEOENCODER_ENABLE_NVENC=ON but nvEncodeAPI.h was not found. Set D3DVIDEOENCODER_NVENC_INCLUDE_DIR or NV_CODEC_SDK_ROOT.")
+    endif()
+    set(D3DVIDEOENCODER_HAS_NVENC ON)
+    message(STATUS "D3DVideoEncoder: NVENC enabled, nvEncodeAPI.h: ${D3DVIDEOENCODER_NVENC_RESOLVED_INCLUDE_DIR}")
+else()
+    message(STATUS "D3DVideoEncoder: NVENC disabled. Enable with -DD3DVIDEOENCODER_ENABLE_NVENC=ON and set D3DVIDEOENCODER_NVENC_INCLUDE_DIR.")
+endif()
+
 set(D3DVIDEOENCODER_PUBLIC_HEADERS
     include/D3DVideoEncoder/D3DVideoEncoder.hpp
     include/D3DVideoEncoder/D3D11VideoEncoder.hpp
@@ -141,6 +172,20 @@ set(D3DVIDEOENCODER_SOURCES
     src/util/HResult.cpp
     src/util/TimestampGenerator.cpp
 )
+if(D3DVIDEOENCODER_HAS_NVENC)
+    list(APPEND D3DVIDEOENCODER_PRIVATE_HEADERS
+        src/backend/nvenc/NvencCommon.hpp
+        src/backend/nvenc/NvencD3D11EncoderBackend.hpp
+        src/backend/nvenc/INvencD3D12EncoderBackend.hpp
+        src/backend/nvenc/NvencD3D12EncoderBackend.hpp
+    )
+    list(APPEND D3DVIDEOENCODER_SOURCES
+        src/backend/nvenc/NvencCommon.cpp
+        src/backend/nvenc/NvencD3D11EncoderBackend.cpp
+        src/backend/nvenc/NvencD3D12EncoderBackend.cpp
+    )
+endif()
+
 
 add_library(D3DVideoEncoder STATIC
     ${D3DVIDEOENCODER_PUBLIC_HEADERS}
@@ -155,6 +200,11 @@ target_include_directories(D3DVideoEncoder
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
+
+if(D3DVIDEOENCODER_HAS_NVENC)
+    target_include_directories(D3DVideoEncoder PRIVATE "${D3DVIDEOENCODER_NVENC_RESOLVED_INCLUDE_DIR}")
+    target_compile_definitions(D3DVideoEncoder PRIVATE D3DVIDEOENCODER_HAS_NVENC=1)
+endif()
 
 target_compile_definitions(D3DVideoEncoder
     PUBLIC

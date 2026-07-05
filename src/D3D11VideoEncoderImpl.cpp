@@ -3,6 +3,10 @@
 #include "backend/MediaFoundationEncoderBackend.hpp"
 #include "backend/UnsupportedEncoderBackend.hpp"
 
+#ifdef D3DVIDEOENCODER_HAS_NVENC
+#include "backend/nvenc/NvencD3D11EncoderBackend.hpp"
+#endif
+
 #include <D3DVideoEncoder/D3DVideoEncoderError.hpp>
 
 #include <cstddef>
@@ -69,7 +73,7 @@ void D3D11VideoEncoder::Impl::validateDesc() const {
     }
     if (desc_.backend != D3DVideoEncoderBackendType::MediaFoundation &&
         desc_.backend != D3DVideoEncoderBackendType::NvencD3D11) {
-        throw D3DVideoEncoderError("D3D11VideoEncoder supports MediaFoundation now; NvencD3D11 is reserved for future implementation.");
+        throw D3DVideoEncoderError("D3D11VideoEncoder supports MediaFoundation and NvencD3D11 backends.");
     }
     if (desc_.backend == D3DVideoEncoderBackendType::MediaFoundation && desc_.codec == VideoCodec::AV1) {
         throw D3DVideoEncoderError("MediaFoundation AV1 backend is not enabled. Use NVENC D3D11 when available.");
@@ -87,7 +91,11 @@ std::unique_ptr<IVideoEncoderBackend> D3D11VideoEncoder::Impl::createBackend() {
     case D3DVideoEncoderBackendType::MediaFoundation:
         return std::make_unique<MediaFoundationEncoderBackend>(log_);
     case D3DVideoEncoderBackendType::NvencD3D11:
+#ifdef D3DVIDEOENCODER_HAS_NVENC
+        return std::make_unique<NvencD3D11EncoderBackend>(log_);
+#else
         return std::make_unique<UnsupportedEncoderBackend>(desc_.backend, log_);
+#endif
     default:
         throw D3DVideoEncoderError("Unsupported D3D11 encoder backend.");
     }

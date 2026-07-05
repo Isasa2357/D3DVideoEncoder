@@ -124,7 +124,7 @@ void MediaFoundationEncoderBackend::initialize(const D3D11VideoEncoderDesc& desc
         nullptr,
         attributes.Get(),
         &sinkWriter_),
-        describeConfiguration() + ": MFCreateSinkWriterFromURL outputPath=" + std::string(desc_.outputPath.begin(), desc_.outputPath.end()));
+        describeConfiguration() + ": MFCreateSinkWriterFromURL");
 
     Microsoft::WRL::ComPtr<IMFMediaType> outputType;
     D3DVE_THROW_IF_FAILED_MSG(MFCreateMediaType(&outputType), describeConfiguration() + ": MFCreateMediaType output");
