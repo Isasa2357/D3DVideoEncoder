@@ -70,6 +70,9 @@ private:
     std::vector<Sample> samples_;
     std::vector<uint8_t> avcSps_;
     std::vector<uint8_t> avcPps_;
+    std::vector<uint8_t> hevcVps_;
+    std::vector<uint8_t> hevcSps_;
+    std::vector<uint8_t> hevcPps_;
 };
 
 } // namespace D3DVideoEncoderLib

@@ -26,8 +26,8 @@ void put_u8(std::vector<uint8_t>& b, uint8_t v) { b.push_back(v); }
 void put_u16(std::vector<uint8_t>& b, uint16_t v) { b.push_back(uint8_t(v >> 8)); b.push_back(uint8_t(v)); }
 void put_u24(std::vector<uint8_t>& b, uint32_t v) { b.push_back(uint8_t(v >> 16)); b.push_back(uint8_t(v >> 8)); b.push_back(uint8_t(v)); }
 void put_u32(std::vector<uint8_t>& b, uint32_t v) { b.push_back(uint8_t(v >> 24)); b.push_back(uint8_t(v >> 16)); b.push_back(uint8_t(v >> 8)); b.push_back(uint8_t(v)); }
+void put_u64(std::vector<uint8_t>& b, uint64_t v) { put_u32(b, uint32_t(v >> 32)); put_u32(b, uint32_t(v)); }
 void put_i16(std::vector<uint8_t>& b, int16_t v) { put_u16(b, static_cast<uint16_t>(v)); }
-
 void put_type(std::vector<uint8_t>& b, const char (&type)[5]) { b.insert(b.end(), type, type + 4); }
 
 void append(std::vector<uint8_t>& dst, const std::vector<uint8_t>& src) {
@@ -72,7 +72,10 @@ std::vector<std::pair<size_t, size_t>> find_annexb_nalus(const std::vector<uint8
         i = nalStart;
         size_t next = bytes.size();
         for (; i + 3 <= bytes.size(); ++i) {
-            if ((i + 4 <= bytes.size() && is_start_code4(bytes.data() + i)) || is_start_code3(bytes.data() + i)) { next = i; break; }
+            if ((i + 4 <= bytes.size() && is_start_code4(bytes.data() + i)) || is_start_code3(bytes.data() + i)) {
+                next = i;
+                break;
+            }
         }
         while (nalStart < next && bytes[nalStart] == 0) ++nalStart;
         if (next > nalStart) ranges.emplace_back(nalStart, next - nalStart);
@@ -101,24 +104,61 @@ std::vector<uint8_t> make_avcc(const std::vector<uint8_t>& sps, const std::vecto
     put_u8(p, sps[1]);
     put_u8(p, sps[2]);
     put_u8(p, sps[3]);
-    put_u8(p, 0xff);
-    put_u8(p, 0xe1);
+    put_u8(p, 0xff); // lengthSizeMinusOne = 3
+    put_u8(p, 0xe1); // one SPS
     put_u16(p, static_cast<uint16_t>(sps.size()));
     p.insert(p.end(), sps.begin(), sps.end());
-    put_u8(p, 1);
+    put_u8(p, 1); // one PPS
     put_u16(p, static_cast<uint16_t>(pps.size()));
     p.insert(p.end(), pps.begin(), pps.end());
     return p;
 }
 
-std::vector<uint8_t> make_ftyp() {
+std::vector<uint8_t> make_hvcc(const std::vector<uint8_t>& vps, const std::vector<uint8_t>& sps, const std::vector<uint8_t>& pps) {
+    if (vps.empty() || sps.empty() || pps.empty()) {
+        throw D3DVideoEncoderError(
+            "D3D12 Video Encode MP4/MKV mux requires HEVC VPS/SPS/PPS in the encoded bitstream. "
+            "If your driver does not emit parameter sets, use .h265 output until parameter-set injection is implemented.");
+    }
+
+    // Minimal hvcC record. This is intentionally conservative and mirrors the existing NVENC muxer.
+    // Some players tolerate these fallback fields as long as VPS/SPS/PPS arrays are present.
+    std::vector<uint8_t> p;
+    put_u8(p, 1);       // configurationVersion
+    put_u8(p, 1);       // general_profile_space/tier/profile_idc fallback
+    put_u32(p, 0);      // general_profile_compatibility_flags
+    put_u32(p, 0);      // general_constraint_indicator_flags high
+    put_u16(p, 0);      // general_constraint_indicator_flags low
+    put_u8(p, 120);     // general_level_idc fallback
+    put_u16(p, 0xf000); // min_spatial_segmentation_idc
+    put_u8(p, 0xfc);    // parallelismType
+    put_u8(p, 0xfc);    // chromaFormat
+    put_u8(p, 0xf8);    // bitDepthLumaMinus8
+    put_u8(p, 0xf8);    // bitDepthChromaMinus8
+    put_u16(p, 0);      // avgFrameRate
+    put_u8(p, 0x0f);    // constantFrameRate/numTemporalLayers/temporalIdNested/lengthSizeMinusOne
+    put_u8(p, 3);       // numOfArrays
+
+    auto addArray = [&](uint8_t nalType, const std::vector<uint8_t>& nal) {
+        put_u8(p, static_cast<uint8_t>(0x80 | nalType)); // array_completeness + NAL_unit_type
+        put_u16(p, 1);
+        put_u16(p, static_cast<uint16_t>(nal.size()));
+        p.insert(p.end(), nal.begin(), nal.end());
+    };
+    addArray(32, vps);
+    addArray(33, sps);
+    addArray(34, pps);
+    return p;
+}
+
+std::vector<uint8_t> make_ftyp(VideoCodec codec) {
     std::vector<uint8_t> p;
     put_type(p, "isom");
     put_u32(p, 0x200);
     put_type(p, "isom");
     put_type(p, "iso2");
     put_type(p, "mp41");
-    put_type(p, "avc1");
+    put_type(p, codec == VideoCodec::HEVC ? "hvc1" : "avc1");
     return box("ftyp", p);
 }
 
@@ -158,21 +198,25 @@ std::vector<uint8_t> make_hdlr() {
     return full_box("hdlr",0,0,p);
 }
 
-std::vector<uint8_t> make_video_sample_entry(uint32_t width, uint32_t height, const std::vector<uint8_t>& configBox) {
+std::vector<uint8_t> make_video_sample_entry(const char (&coding)[5], uint32_t width, uint32_t height, const std::vector<uint8_t>& configBox) {
     std::vector<uint8_t> p;
-    p.resize(6,0); put_u16(p,1);
+    p.resize(6,0); put_u16(p,1); // reserved + data_reference_index
     put_u16(p,0); put_u16(p,0); put_u32(p,0); put_u32(p,0); put_u32(p,0);
     put_u16(p,static_cast<uint16_t>(width)); put_u16(p,static_cast<uint16_t>(height));
     put_u32(p,0x00480000); put_u32(p,0x00480000); put_u32(p,0); put_u16(p,1);
     p.push_back(0); p.resize(p.size()+31,0); put_u16(p,0x18); put_u16(p,0xffff);
     append(p, configBox);
-    return box("avc1", p);
+    return box(coding, p);
 }
 
-std::vector<uint8_t> make_stsd(uint32_t width, uint32_t height, const std::vector<uint8_t>& avcC) {
+std::vector<uint8_t> make_stsd(VideoCodec codec, uint32_t width, uint32_t height, const std::vector<uint8_t>& codecConfig) {
     std::vector<uint8_t> p;
     put_u32(p,1);
-    append(p, make_video_sample_entry(width, height, box("avcC", avcC)));
+    if (codec == VideoCodec::HEVC) {
+        append(p, make_video_sample_entry("hvc1", width, height, box("hvcC", codecConfig)));
+    } else {
+        append(p, make_video_sample_entry("avc1", width, height, box("avcC", codecConfig)));
+    }
     return full_box("stsd",0,0,p);
 }
 
@@ -224,8 +268,8 @@ D3D12VideoEncodeBitstreamWriter::Container D3D12VideoEncodeBitstreamWriter::choo
     const auto ext = lower_extension(std::filesystem::path(outputPath));
     if (ext == L".mp4" || ext == L".m4v") return Container::Mp4;
     if (ext == L".mkv") return Container::Mkv;
-    if (ext == L".h264" || ext == L".264" || ext == L".h265" || ext == L".265" || ext == L".hevc") return Container::Elementary;
-    throw D3DVideoEncoderError("D3D12VideoEncodeBackend supports .h264/.264, .h265/.265/.hevc elementary stream and H.264 .mp4/.mkv container output.");
+    if (ext == L".h264" || ext == L".264" || ext == L".h265" || ext == L".265") return Container::Elementary;
+    throw D3DVideoEncoderError("D3D12VideoEncodeBackend supports .h264/.264/.h265/.265 elementary stream and .mp4/.mkv container output in the H.264/HEVC phase.");
 }
 
 bool D3D12VideoEncodeBitstreamWriter::isContainerMux() const noexcept {
@@ -239,7 +283,7 @@ void D3D12VideoEncodeBitstreamWriter::open(const std::wstring& outputPath) {
             "D3D12VideoEncodeBitstreamWriter container output requires width/height/fps/codec metadata. "
             "Call the metadata open() overload from D3D12VideoEncodeBackend.");
     }
-    open(outputPath, 0, 0, 60, 1, (ext == L".h265" || ext == L".265" || ext == L".hevc") ? VideoCodec::HEVC : VideoCodec::H264);
+    open(outputPath, 0, 0, 60, 1, VideoCodec::H264);
 }
 
 void D3D12VideoEncodeBitstreamWriter::open(
@@ -254,7 +298,7 @@ void D3D12VideoEncodeBitstreamWriter::open(
         throw D3DVideoEncoderError("D3D12VideoEncodeBitstreamWriter output path is empty.");
     }
     if (codec != VideoCodec::H264 && codec != VideoCodec::HEVC) {
-        throw D3DVideoEncoderError("D3D12VideoEncodeBitstreamWriter currently supports H.264 and HEVC output.");
+        throw D3DVideoEncoderError("D3D12VideoEncodeBitstreamWriter currently supports only H.264/HEVC output.");
     }
 
     path_ = std::filesystem::path(outputPath);
@@ -264,10 +308,6 @@ void D3D12VideoEncodeBitstreamWriter::open(
     frameRateDen_ = frameRateDen;
     codec_ = codec;
     container_ = chooseContainer(outputPath);
-
-    if (codec_ == VideoCodec::HEVC && container_ != Container::Elementary) {
-        throw D3DVideoEncoderError("D3D12VideoEncodeBackend HEVC currently supports only .h265/.265/.hevc elementary stream output. HEVC MP4/MKV mux is a later phase.");
-    }
 
     if (path_.has_parent_path()) {
         std::filesystem::create_directories(path_.parent_path());
@@ -286,6 +326,9 @@ void D3D12VideoEncodeBitstreamWriter::open(
     samples_.clear();
     avcSps_.clear();
     avcPps_.clear();
+    hevcVps_.clear();
+    hevcSps_.clear();
+    hevcPps_.clear();
     opened_ = true;
 }
 
@@ -302,10 +345,19 @@ void D3D12VideoEncodeBitstreamWriter::parseParameterSetsAndSample(Sample& sample
     for (const auto& r : find_annexb_nalus(sample.annexB)) {
         const uint8_t* nal = sample.annexB.data() + r.first;
         if (r.second == 0) continue;
-        const uint8_t type = nal[0] & 0x1f;
-        if (type == 7) avcSps_.assign(nal, nal + r.second);
-        else if (type == 8) avcPps_.assign(nal, nal + r.second);
-        else if (type == 5) sample.keyFrame = true;
+        if (codec_ == VideoCodec::H264) {
+            const uint8_t type = nal[0] & 0x1f;
+            if (type == 7) avcSps_.assign(nal, nal + r.second);
+            else if (type == 8) avcPps_.assign(nal, nal + r.second);
+            else if (type == 5) sample.keyFrame = true;
+        } else if (codec_ == VideoCodec::HEVC) {
+            if (r.second < 2) continue;
+            const uint8_t type = static_cast<uint8_t>((nal[0] >> 1) & 0x3f);
+            if (type == 32) hevcVps_.assign(nal, nal + r.second);
+            else if (type == 33) hevcSps_.assign(nal, nal + r.second);
+            else if (type == 34) hevcPps_.assign(nal, nal + r.second);
+            else if (type >= 16 && type <= 21) sample.keyFrame = true;
+        }
     }
 }
 
@@ -350,11 +402,8 @@ void D3D12VideoEncodeBitstreamWriter::writeMp4() {
     if (samples_.empty()) {
         throw D3DVideoEncoderError("No D3D12 Video Encode samples were produced; cannot write MP4.");
     }
-    if (codec_ != VideoCodec::H264) {
-        throw D3DVideoEncoderError("D3D12 Video Encode MP4 mux currently supports only H.264.");
-    }
 
-    const auto ftyp = make_ftyp();
+    const auto ftyp = make_ftyp(codec_);
     std::vector<uint8_t> mdatPayload;
     std::vector<uint64_t> offsets;
     offsets.reserve(samples_.size());
@@ -407,8 +456,18 @@ void D3D12VideoEncodeBitstreamWriter::writeMp4() {
     }
     auto stco = full_box("stco",0,0,stcoP);
 
-    const auto avcC = make_avcc(avcSps_, avcPps_);
-    std::vector<uint8_t> stblP; append(stblP, make_stsd(width_, height_, avcC)); append(stblP, stts); if (keyCount > 0) append(stblP, stss); append(stblP, stsc); append(stblP, stsz); append(stblP, stco); auto stbl = box("stbl", stblP);
+    const auto codecConfig = (codec_ == VideoCodec::HEVC)
+        ? make_hvcc(hevcVps_, hevcSps_, hevcPps_)
+        : make_avcc(avcSps_, avcPps_);
+    std::vector<uint8_t> stblP;
+    append(stblP, make_stsd(codec_, width_, height_, codecConfig));
+    append(stblP, stts);
+    if (keyCount > 0) append(stblP, stss);
+    append(stblP, stsc);
+    append(stblP, stsz);
+    append(stblP, stco);
+    auto stbl = box("stbl", stblP);
+
     std::vector<uint8_t> drefP; put_u32(drefP,1); append(drefP, full_box("url ",0,1,{})); auto dinf = box("dinf", full_box("dref",0,0,drefP));
     std::vector<uint8_t> vmhdP; put_u16(vmhdP,0); put_u16(vmhdP,0); put_u16(vmhdP,0); put_u16(vmhdP,0); auto vmhd = full_box("vmhd",0,1,vmhdP);
     std::vector<uint8_t> minfP; append(minfP, vmhd); append(minfP, dinf); append(minfP, stbl); auto minf = box("minf", minfP);
@@ -429,14 +488,18 @@ void D3D12VideoEncodeBitstreamWriter::writeMkv() {
     if (samples_.empty()) {
         throw D3DVideoEncoderError("No D3D12 Video Encode samples were produced; cannot write MKV.");
     }
-    if (codec_ != VideoCodec::H264) {
-        throw D3DVideoEncoderError("D3D12 Video Encode MKV mux currently supports only H.264.");
-    }
-    const auto avcC = make_avcc(avcSps_, avcPps_);
-    std::vector<uint8_t> ebmlHeader; append(ebmlHeader,ebml_uint(0x4286,1)); append(ebmlHeader,ebml_uint(0x42F7,1)); append(ebmlHeader,ebml_uint(0x42F2,4)); append(ebmlHeader,ebml_uint(0x42F3,8)); append(ebmlHeader,ebml_string(0x4282,"matroska")); append(ebmlHeader,ebml_uint(0x4287,4)); append(ebmlHeader,ebml_uint(0x4285,2)); ebmlHeader = ebml(0x1A45DFA3, ebmlHeader);
+
+    const auto codecPrivate = (codec_ == VideoCodec::HEVC)
+        ? make_hvcc(hevcVps_, hevcSps_, hevcPps_)
+        : make_avcc(avcSps_, avcPps_);
+
+    std::vector<uint8_t> ebmlHeader;
+    append(ebmlHeader,ebml_uint(0x4286,1)); append(ebmlHeader,ebml_uint(0x42F7,1)); append(ebmlHeader,ebml_uint(0x42F2,4)); append(ebmlHeader,ebml_uint(0x42F3,8)); append(ebmlHeader,ebml_string(0x4282,"matroska")); append(ebmlHeader,ebml_uint(0x4287,4)); append(ebmlHeader,ebml_uint(0x4285,2)); ebmlHeader = ebml(0x1A45DFA3, ebmlHeader);
+
     std::vector<uint8_t> info; append(info,ebml_uint(0x2AD7B1,1000000)); append(info,ebml_string(0x4D80,"D3DVideoEncoder")); append(info,ebml_string(0x5741,"D3DVideoEncoder"));
     std::vector<uint8_t> video; append(video,ebml_uint(0xB0,width_)); append(video,ebml_uint(0xBA,height_));
-    std::vector<uint8_t> track; append(track,ebml_uint(0xD7,1)); append(track,ebml_uint(0x73C5,1)); append(track,ebml_uint(0x83,1)); append(track,ebml_string(0x86,"V_MPEG4/ISO/AVC")); append(track,ebml_binary(0x63A2, avcC)); append(track,ebml(0xE0, video));
+    const char* codecId = codec_ == VideoCodec::HEVC ? "V_MPEGH/ISO/HEVC" : "V_MPEG4/ISO/AVC";
+    std::vector<uint8_t> track; append(track,ebml_uint(0xD7,1)); append(track,ebml_uint(0x73C5,1)); append(track,ebml_uint(0x83,1)); append(track,ebml_string(0x86,codecId)); append(track,ebml_binary(0x63A2, codecPrivate)); append(track,ebml(0xE0, video));
     std::vector<uint8_t> tracks = ebml(0x1654AE6B, ebml(0xAE, track));
     std::vector<uint8_t> clusterPayload; append(clusterPayload,ebml_uint(0xE7,0));
     for (const auto& sample : samples_) {
