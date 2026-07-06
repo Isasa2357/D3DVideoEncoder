@@ -35,6 +35,13 @@ void throw_hr(HRESULT hr, const char* what) {
     }
 }
 
+D3D12_VIDEO_ENCODER_CODEC d3d_codec(VideoCodec codec) {
+    switch (codec) {
+    case VideoCodec::H264: return D3D12_VIDEO_ENCODER_CODEC_H264;
+    case VideoCodec::HEVC: return D3D12_VIDEO_ENCODER_CODEC_HEVC;
+    default: throw D3DVideoEncoderError("D3D12VideoEncodeBackend supports only H.264 and HEVC in this phase.");
+    }
+}
 
 D3D12CoreLib::Processing::ProcessingColorMatrix ToProcessingMatrix(VideoColorMatrix matrix) noexcept {
     switch (matrix) {
@@ -94,7 +101,7 @@ D3D12_RESOURCE_DESC buffer_desc(uint64_t size) noexcept {
     return desc;
 }
 
-D3D12_RESOURCE_DESC nv12_texture_desc(uint32_t width, uint32_t height) noexcept {
+D3D12_RESOURCE_DESC encode_texture_desc(uint32_t width, uint32_t height, DXGI_FORMAT format) noexcept {
     D3D12_RESOURCE_DESC desc = {};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     desc.Alignment = 0;
@@ -102,7 +109,7 @@ D3D12_RESOURCE_DESC nv12_texture_desc(uint32_t width, uint32_t height) noexcept 
     desc.Height = height;
     desc.DepthOrArraySize = 1;
     desc.MipLevels = 1;
-    desc.Format = DXGI_FORMAT_NV12;
+    desc.Format = format;
     desc.SampleDesc.Count = 1;
     desc.SampleDesc.Quality = 0;
     desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
@@ -125,51 +132,93 @@ D3D12_RESOURCE_BARRIER transition_barrier(
     return barrier;
 }
 
-struct H264ProfileStorage {
-    D3D12_VIDEO_ENCODER_PROFILE_H264 profile = D3D12_VIDEO_ENCODER_PROFILE_H264_HIGH;
+struct CodecProfileStorage {
+    D3D12_VIDEO_ENCODER_PROFILE_H264 h264 = D3D12_VIDEO_ENCODER_PROFILE_H264_HIGH;
+    D3D12_VIDEO_ENCODER_PROFILE_HEVC hevc = D3D12_VIDEO_ENCODER_PROFILE_HEVC_MAIN;
     D3D12_VIDEO_ENCODER_PROFILE_DESC desc = {};
 
-    H264ProfileStorage() {
-        desc.DataSize = sizeof(profile);
-        desc.pH264Profile = &profile;
+    CodecProfileStorage(VideoCodec codec, VideoPixelFormat format) {
+        if (codec == VideoCodec::HEVC) {
+            hevc = (format == VideoPixelFormat::P010)
+                ? D3D12_VIDEO_ENCODER_PROFILE_HEVC_MAIN10
+                : D3D12_VIDEO_ENCODER_PROFILE_HEVC_MAIN;
+            desc.DataSize = sizeof(hevc);
+            desc.pHEVCProfile = &hevc;
+        } else {
+            h264 = D3D12_VIDEO_ENCODER_PROFILE_H264_HIGH;
+            desc.DataSize = sizeof(h264);
+            desc.pH264Profile = &h264;
+        }
     }
 };
 
-struct H264LevelStorage {
-    D3D12_VIDEO_ENCODER_LEVELS_H264 level = D3D12_VIDEO_ENCODER_LEVELS_H264_52;
+struct CodecLevelStorage {
+    D3D12_VIDEO_ENCODER_LEVELS_H264 h264 = D3D12_VIDEO_ENCODER_LEVELS_H264_52;
+    D3D12_VIDEO_ENCODER_LEVEL_TIER_CONSTRAINTS_HEVC hevc = {
+        D3D12_VIDEO_ENCODER_LEVELS_HEVC_52,
+        D3D12_VIDEO_ENCODER_TIER_HEVC_MAIN
+    };
     D3D12_VIDEO_ENCODER_LEVEL_SETTING desc = {};
 
-    H264LevelStorage() {
-        desc.DataSize = sizeof(level);
-        desc.pH264LevelSetting = &level;
+    explicit CodecLevelStorage(VideoCodec codec) {
+        if (codec == VideoCodec::HEVC) {
+            desc.DataSize = sizeof(hevc);
+            desc.pHEVCLevelSetting = &hevc;
+        } else {
+            desc.DataSize = sizeof(h264);
+            desc.pH264LevelSetting = &h264;
+        }
     }
 };
 
-struct H264CodecConfigStorage {
+struct CodecConfigStorage {
     D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_H264 h264 = {};
+    D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC hevc = {};
     D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION desc = {};
 
-    H264CodecConfigStorage() {
-        h264.ConfigurationFlags = D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_H264_FLAG_NONE;
-        h264.DirectModeConfig = D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_H264_DIRECT_MODES_DISABLED;
-        h264.DisableDeblockingFilterConfig = D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_H264_SLICES_DEBLOCKING_MODE_0_ALL_LUMA_CHROMA_SLICE_BLOCK_EDGES_ALWAYS_FILTERED;
-        desc.DataSize = sizeof(h264);
-        desc.pH264Config = &h264;
+    explicit CodecConfigStorage(VideoCodec codec) {
+        if (codec == VideoCodec::HEVC) {
+            hevc.ConfigurationFlags = D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_NONE;
+            hevc.MinLumaCodingUnitSize = D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_CUSIZE_8x8;
+            hevc.MaxLumaCodingUnitSize = D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_CUSIZE_64x64;
+            hevc.MinLumaTransformUnitSize = D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_TUSIZE_4x4;
+            hevc.MaxLumaTransformUnitSize = D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_TUSIZE_32x32;
+            hevc.max_transform_hierarchy_depth_inter = 0;
+            hevc.max_transform_hierarchy_depth_intra = 0;
+            desc.DataSize = sizeof(hevc);
+            desc.pHEVCConfig = &hevc;
+        } else {
+            h264.ConfigurationFlags = D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_H264_FLAG_NONE;
+            h264.DirectModeConfig = D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_H264_DIRECT_MODES_DISABLED;
+            h264.DisableDeblockingFilterConfig = D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_H264_SLICES_DEBLOCKING_MODE_0_ALL_LUMA_CHROMA_SLICE_BLOCK_EDGES_ALWAYS_FILTERED;
+            desc.DataSize = sizeof(h264);
+            desc.pH264Config = &h264;
+        }
     }
 };
 
-struct H264GopStorage {
+struct CodecGopStorage {
     D3D12_VIDEO_ENCODER_SEQUENCE_GOP_STRUCTURE_H264 h264 = {};
+    D3D12_VIDEO_ENCODER_SEQUENCE_GOP_STRUCTURE_HEVC hevc = {};
     D3D12_VIDEO_ENCODER_SEQUENCE_GOP_STRUCTURE desc = {};
 
-    explicit H264GopStorage(uint32_t gopLength) {
-        h264.GOPLength = std::max<uint32_t>(gopLength, 1);
-        h264.PPicturePeriod = 1;
-        h264.pic_order_cnt_type = 0;
-        h264.log2_max_frame_num_minus4 = 4;
-        h264.log2_max_pic_order_cnt_lsb_minus4 = 4;
-        desc.DataSize = sizeof(h264);
-        desc.pH264GroupOfPictures = &h264;
+    CodecGopStorage(VideoCodec codec, uint32_t gopLength) {
+        const UINT gop = std::max<uint32_t>(gopLength, 1);
+        if (codec == VideoCodec::HEVC) {
+            hevc.GOPLength = gop;
+            hevc.PPicturePeriod = 1;
+            hevc.log2_max_pic_order_cnt_lsb_minus4 = 4;
+            desc.DataSize = sizeof(hevc);
+            desc.pHEVCGroupOfPictures = &hevc;
+        } else {
+            h264.GOPLength = gop;
+            h264.PPicturePeriod = 1;
+            h264.pic_order_cnt_type = 0;
+            h264.log2_max_frame_num_minus4 = 4;
+            h264.log2_max_pic_order_cnt_lsb_minus4 = 4;
+            desc.DataSize = sizeof(h264);
+            desc.pH264GroupOfPictures = &h264;
+        }
     }
 };
 
@@ -185,7 +234,7 @@ struct RateControlStorage {
         if (useCbr) {
             cbr.InitialQP = 26;
             cbr.MinQP = 0;
-            cbr.MaxQP = 51;
+            cbr.MaxQP = (encoderDesc.internalFormat == VideoPixelFormat::P010) ? 63 : 51;
             cbr.MaxFrameBitSize = 0;
             cbr.TargetBitRate = encoderDesc.bitrate;
             cbr.VBVCapacity = std::max<uint64_t>(encoderDesc.bitrate, 1u);
@@ -215,7 +264,6 @@ D3D12VideoEncodeBackend::D3D12VideoEncodeBackend(DebugLog log) : log_(log) {}
 D3D12VideoEncodeBackend::~D3D12VideoEncodeBackend() {
     try { close(); } catch (...) {}
 }
-
 
 bool D3D12VideoEncodeBackend::inputAlreadyMatchesInternalFormat() const noexcept {
     return desc_.input.inputFormat == ToDxgiFormat(desc_.internalFormat);
@@ -286,27 +334,26 @@ void D3D12VideoEncodeBackend::initialize(const D3D12VideoEncoderDesc& desc) {
     createBuffers();
     createReconstructedPictures();
     createFences();
-    writer_.open(desc_.outputPath);
+    writer_.open(desc_.outputPath, desc_.width, desc_.height, desc_.frameRateNum, desc_.frameRateDen, desc_.codec);
 
     open_ = true;
     log_.info(useProcessing_
-        ? (desc_.asyncMode
-            ? "D3D12VideoEncodeBackend initialized with async D3D12Processing RGB/crop/resize -> NV12 path"
-            : "D3D12VideoEncodeBackend initialized with D3D12Processing RGB/crop/resize -> NV12 path")
-        : (desc_.asyncMode
-            ? "D3D12VideoEncodeBackend initialized with async direct H.264/NV12 input path"
-            : "D3D12VideoEncodeBackend initialized with direct H.264/NV12 input path"));
+        ? "D3D12VideoEncodeBackend initialized with D3D12Processing RGB/crop/resize -> encode format path"
+        : "D3D12VideoEncodeBackend initialized with direct native D3D12 Video Encode input path");
 }
 
 void D3D12VideoEncodeBackend::validateDesc() {
     if (!desc_.input.core) {
         throw D3DVideoEncoderError("D3D12VideoEncodeBackend requires desc.input.core.");
     }
-    if (desc_.codec != VideoCodec::H264) {
-        throw D3DVideoEncoderError("D3D12VideoEncodeBackend currently supports only H.264.");
+    if (desc_.codec != VideoCodec::H264 && desc_.codec != VideoCodec::HEVC) {
+        throw D3DVideoEncoderError("D3D12VideoEncodeBackend currently supports only H.264 and HEVC.");
     }
-    if (desc_.internalFormat != VideoPixelFormat::NV12) {
-        throw D3DVideoEncoderError("D3D12VideoEncodeBackend currently supports only internalFormat=NV12.");
+    if (desc_.codec == VideoCodec::H264 && desc_.internalFormat != VideoPixelFormat::NV12) {
+        throw D3DVideoEncoderError("D3D12VideoEncodeBackend H.264 requires internalFormat=NV12.");
+    }
+    if (desc_.codec == VideoCodec::HEVC && desc_.internalFormat != VideoPixelFormat::NV12 && desc_.internalFormat != VideoPixelFormat::P010) {
+        throw D3DVideoEncoderError("D3D12VideoEncodeBackend HEVC requires internalFormat=NV12 or P010.");
     }
     if (desc_.bFrameCount != 0) {
         throw D3DVideoEncoderError("D3D12VideoEncodeBackend currently requires bFrameCount=0.");
@@ -318,26 +365,26 @@ void D3D12VideoEncodeBackend::validateDesc() {
         throw D3DVideoEncoderError("D3D12VideoEncodeBackend sourceWidth/sourceHeight resolved to zero.");
     }
 
-    const bool directNv12 = inputAlreadyMatchesInternalFormat();
+    const bool directMatch = inputAlreadyMatchesInternalFormat();
     const bool rgbaLike = inputIsRgbaLike();
     const bool resizeOrCrop = needsResizeOrCrop();
-    useProcessing_ = !directNv12 || resizeOrCrop;
+    useProcessing_ = !directMatch || resizeOrCrop;
 
-    if (directNv12 && resizeOrCrop) {
+    if (directMatch && resizeOrCrop) {
         throw D3DVideoEncoderError(
-            "D3D12VideoEncodeBackend direct NV12 crop/resize is not supported yet. "
-            "Use RGB-like input for crop/resize, or provide an already-sized NV12 texture.");
+            "D3D12VideoEncodeBackend direct NV12/P010 crop/resize is not supported yet. "
+            "Use RGB-like input for crop/resize, or provide an already-sized encode-format texture.");
     }
-    if (!directNv12 && !rgbaLike) {
+    if (!directMatch && !rgbaLike) {
         std::ostringstream oss;
         oss << "D3D12VideoEncodeBackend input.inputFormat is unsupported. "
-            << "Direct path requires NV12; conversion path requires RGBA-like input. inputFormat="
+            << "Direct path requires inputFormat to match internalFormat; conversion path requires RGBA-like input. inputFormat="
             << FormatDxgi(desc_.input.inputFormat);
         throw D3DVideoEncoderError(oss.str());
     }
     if (useProcessing_ && !desc_.input.allowFormatConversion) {
         throw D3DVideoEncoderError(
-            "D3D12VideoEncodeBackend requires D3D12Processing because the input format/size/crop does not directly match NV12 encode input, "
+            "D3D12VideoEncodeBackend requires D3D12Processing because the input format/size/crop does not directly match encode input, "
             "but desc.input.allowFormatConversion=false.");
     }
     if (useProcessing_ && !rgbaLike) {
@@ -375,17 +422,17 @@ void D3D12VideoEncodeBackend::queryEncodeSupport() {
         throw D3DVideoEncoderError(oss.str());
     }
 
-    H264ProfileStorage profile;
-    H264CodecConfigStorage codecConfig;
-    H264GopStorage gop(desc_.gopLength);
+    CodecProfileStorage profile(desc_.codec, desc_.internalFormat);
+    CodecConfigStorage codecConfig(desc_.codec);
+    CodecGopStorage gop(desc_.codec, desc_.gopLength);
     RateControlStorage rateControl(desc_, capability_.cbrSupported);
     D3D12_VIDEO_ENCODER_PICTURE_RESOLUTION_DESC resolution = { desc_.width, desc_.height };
     D3D12_FEATURE_DATA_VIDEO_ENCODER_RESOLUTION_SUPPORT_LIMITS resolutionLimits = {};
 
     D3D12_FEATURE_DATA_VIDEO_ENCODER_SUPPORT support = {};
     support.NodeIndex = 0;
-    support.Codec = D3D12_VIDEO_ENCODER_CODEC_H264;
-    support.InputFormat = DXGI_FORMAT_NV12;
+    support.Codec = d3d_codec(desc_.codec);
+    support.InputFormat = ToDxgiFormat(desc_.internalFormat);
     support.CodecConfiguration = codecConfig.desc;
     support.CodecGopSequence = gop.desc;
     support.RateControl = rateControl.desc;
@@ -410,13 +457,13 @@ void D3D12VideoEncodeBackend::queryEncodeSupport() {
 }
 
 void D3D12VideoEncodeBackend::queryResourceRequirements() {
-    H264ProfileStorage profile;
+    CodecProfileStorage profile(desc_.codec, desc_.internalFormat);
 
     D3D12_FEATURE_DATA_VIDEO_ENCODER_RESOURCE_REQUIREMENTS req = {};
     req.NodeIndex = 0;
-    req.Codec = D3D12_VIDEO_ENCODER_CODEC_H264;
+    req.Codec = d3d_codec(desc_.codec);
     req.Profile = profile.desc;
-    req.InputFormat = DXGI_FORMAT_NV12;
+    req.InputFormat = ToDxgiFormat(desc_.internalFormat);
     req.PictureTargetResolution = { desc_.width, desc_.height };
 
     const HRESULT hr = videoDevice_->CheckFeatureSupport(
@@ -435,23 +482,24 @@ void D3D12VideoEncodeBackend::queryResourceRequirements() {
         metadataAlignment_);
 
     const uint64_t framePixels = static_cast<uint64_t>(desc_.width) * static_cast<uint64_t>(desc_.height);
-    const uint64_t roughFrameBytes = framePixels * 4ull + 1024ull * 1024ull;
+    const uint64_t bytesPerPixelEstimate = desc_.internalFormat == VideoPixelFormat::P010 ? 6ull : 4ull;
+    const uint64_t roughFrameBytes = framePixels * bytesPerPixelEstimate + 1024ull * 1024ull;
     const uint64_t roughRateBytes = (static_cast<uint64_t>(desc_.bitrate) / std::max<uint32_t>(desc_.frameRateNum, 1u)) + 1024ull * 1024ull;
     bitstreamBufferSize_ = align_up_u64(std::max<uint64_t>(roughFrameBytes, roughRateBytes), bitstreamAlignment_);
 }
 
 void D3D12VideoEncodeBackend::createEncoderObjects() {
-    H264ProfileStorage profile;
-    H264LevelStorage level;
-    H264CodecConfigStorage codecConfig;
+    CodecProfileStorage profile(desc_.codec, desc_.internalFormat);
+    CodecLevelStorage level(desc_.codec);
+    CodecConfigStorage codecConfig(desc_.codec);
     D3D12_VIDEO_ENCODER_PICTURE_RESOLUTION_DESC resolution = { desc_.width, desc_.height };
 
     D3D12_VIDEO_ENCODER_DESC encoderDesc = {};
     encoderDesc.NodeMask = 0;
     encoderDesc.Flags = D3D12_VIDEO_ENCODER_FLAG_NONE;
-    encoderDesc.EncodeCodec = D3D12_VIDEO_ENCODER_CODEC_H264;
+    encoderDesc.EncodeCodec = d3d_codec(desc_.codec);
     encoderDesc.EncodeProfile = profile.desc;
-    encoderDesc.InputFormat = DXGI_FORMAT_NV12;
+    encoderDesc.InputFormat = ToDxgiFormat(desc_.internalFormat);
     encoderDesc.CodecConfiguration = codecConfig.desc;
     encoderDesc.MaxMotionEstimationPrecision = D3D12_VIDEO_ENCODER_MOTION_ESTIMATION_PRECISION_MODE_FULL_PIXEL;
 
@@ -460,7 +508,7 @@ void D3D12VideoEncodeBackend::createEncoderObjects() {
     D3D12_VIDEO_ENCODER_HEAP_DESC heapDesc = {};
     heapDesc.NodeMask = 0;
     heapDesc.Flags = D3D12_VIDEO_ENCODER_HEAP_FLAG_NONE;
-    heapDesc.EncodeCodec = D3D12_VIDEO_ENCODER_CODEC_H264;
+    heapDesc.EncodeCodec = d3d_codec(desc_.codec);
     heapDesc.EncodeProfile = profile.desc;
     heapDesc.EncodeLevel = level.desc;
     heapDesc.ResolutionsListCount = 1;
@@ -509,9 +557,9 @@ void D3D12VideoEncodeBackend::createBuffers() {
 void D3D12VideoEncodeBackend::createReconstructedPictures() {
     ID3D12Device* device = desc_.input.core->GetDevice();
     const auto defaultHeap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
-    const auto textureDesc = nv12_texture_desc(desc_.width, desc_.height);
+    const auto textureDesc = encode_texture_desc(desc_.width, desc_.height, ToDxgiFormat(desc_.internalFormat));
     for (auto& recon : reconstructedPictures_) {
-        throw_hr(device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &textureDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&recon)), "Create reconstructed NV12 texture");
+        throw_hr(device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &textureDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&recon)), "Create reconstructed encode-format texture");
     }
 }
 
@@ -520,7 +568,6 @@ void D3D12VideoEncodeBackend::createFences() {
     throw_hr(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&videoFence_)), "Create video fence");
     throw_hr(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&copyFence_)), "Create copy fence");
 }
-
 
 void D3D12VideoEncodeBackend::initializeProcessingIfNeeded() {
     auto& core = *desc_.input.core;
@@ -555,7 +602,7 @@ void D3D12VideoEncodeBackend::initializeProcessingIfNeeded() {
         core,
         desc_.width,
         desc_.height,
-        DXGI_FORMAT_NV12,
+        ToDxgiFormat(desc_.internalFormat),
         D3D12_RESOURCE_STATE_COMMON);
     convertedTextureState_ = D3D12_RESOURCE_STATE_COMMON;
 }
@@ -644,7 +691,7 @@ ID3D12Resource* D3D12VideoEncodeBackend::convertToInternalFormat(ID3D12Resource*
 
     D3D12CoreLib::Processing::FormatConvertDesc convert = {};
     convert.srcFormat = desc_.input.inputFormat;
-    convert.dstFormat = DXGI_FORMAT_NV12;
+    convert.dstFormat = ToDxgiFormat(desc_.internalFormat);
     convert.color.srcMatrix = ToProcessingMatrix(desc_.colorMatrix);
     convert.color.dstMatrix = ToProcessingMatrix(desc_.colorMatrix);
     convert.color.srcRange = ToProcessingRange(desc_.colorRange);
@@ -701,44 +748,73 @@ void D3D12VideoEncodeBackend::recordEncodeFrame(ID3D12Resource* resource, D3D12_
         reconstructedStates_[previousReconIndex_] = D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ;
     }
 
-    H264GopStorage gop(desc_.gopLength);
+    CodecGopStorage gop(desc_.codec, desc_.gopLength);
     RateControlStorage rateControl(desc_, capability_.cbrSupported);
 
-    D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_H264 h264Pic = {};
-    h264Pic.Flags = D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_H264_FLAG_NONE;
-    h264Pic.FrameType = idr ? D3D12_VIDEO_ENCODER_FRAME_TYPE_H264_IDR_FRAME : D3D12_VIDEO_ENCODER_FRAME_TYPE_H264_P_FRAME;
-    h264Pic.pic_parameter_set_id = 0;
-    h264Pic.idr_pic_id = static_cast<UINT>(frameIndex_ & 0xFFFFu);
-    h264Pic.PictureOrderCountNumber = static_cast<UINT>(frameIndex_);
-    h264Pic.FrameDecodingOrderNumber = static_cast<UINT>(frameIndex_);
-    h264Pic.TemporalLayerIndex = 0;
-
-    UINT list0Index = 0;
-    D3D12_VIDEO_ENCODER_REFERENCE_PICTURE_DESCRIPTOR_H264 refDesc = {};
+    D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA picCodecData = {};
+    D3D12_VIDEO_ENCODE_REFERENCE_FRAMES referenceFrames = {};
     ID3D12Resource* refResource = nullptr;
     UINT refSubresource = 0;
 
-    if (!idr && hasReferenceFrame_) {
-        refDesc.ReconstructedPictureResourceIndex = 0;
-        refDesc.IsLongTermReference = FALSE;
-        refDesc.LongTermPictureIdx = 0;
-        refDesc.PictureOrderCountNumber = static_cast<UINT>(frameIndex_ - 1);
-        refDesc.FrameDecodingOrderNumber = static_cast<UINT>(frameIndex_ - 1);
-        refDesc.TemporalLayerIndex = 0;
+    D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_H264 h264Pic = {};
+    UINT h264List0Index = 0;
+    D3D12_VIDEO_ENCODER_REFERENCE_PICTURE_DESCRIPTOR_H264 h264RefDesc = {};
 
-        h264Pic.List0ReferenceFramesCount = 1;
-        h264Pic.pList0ReferenceFrames = &list0Index;
-        h264Pic.ReferenceFramesReconPictureDescriptorsCount = 1;
-        h264Pic.pReferenceFramesReconPictureDescriptors = &refDesc;
+    D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC hevcPic = {};
+    UINT hevcList0Index = 0;
+    D3D12_VIDEO_ENCODER_REFERENCE_PICTURE_DESCRIPTOR_HEVC hevcRefDesc = {};
 
-        refResource = reconstructedPictures_[previousReconIndex_].Get();
+    if (desc_.codec == VideoCodec::HEVC) {
+        hevcPic.Flags = D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC_FLAG_NONE;
+        hevcPic.FrameType = idr ? D3D12_VIDEO_ENCODER_FRAME_TYPE_HEVC_IDR_FRAME : D3D12_VIDEO_ENCODER_FRAME_TYPE_HEVC_P_FRAME;
+        hevcPic.slice_pic_parameter_set_id = 0;
+        hevcPic.PictureOrderCountNumber = static_cast<UINT>(frameIndex_);
+        hevcPic.TemporalLayerIndex = 0;
+
+        if (!idr && hasReferenceFrame_) {
+            hevcRefDesc.ReconstructedPictureResourceIndex = 0;
+            hevcRefDesc.IsRefUsedByCurrentPic = TRUE;
+            hevcRefDesc.IsLongTermReference = FALSE;
+            hevcRefDesc.PictureOrderCountNumber = static_cast<UINT>(frameIndex_ - 1);
+            hevcRefDesc.TemporalLayerIndex = 0;
+
+            hevcPic.List0ReferenceFramesCount = 1;
+            hevcPic.pList0ReferenceFrames = &hevcList0Index;
+            hevcPic.ReferenceFramesReconPictureDescriptorsCount = 1;
+            hevcPic.pReferenceFramesReconPictureDescriptors = &hevcRefDesc;
+            refResource = reconstructedPictures_[previousReconIndex_].Get();
+        }
+
+        picCodecData.DataSize = sizeof(hevcPic);
+        picCodecData.pHEVCPicData = &hevcPic;
+    } else {
+        h264Pic.Flags = D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_H264_FLAG_NONE;
+        h264Pic.FrameType = idr ? D3D12_VIDEO_ENCODER_FRAME_TYPE_H264_IDR_FRAME : D3D12_VIDEO_ENCODER_FRAME_TYPE_H264_P_FRAME;
+        h264Pic.pic_parameter_set_id = 0;
+        h264Pic.idr_pic_id = static_cast<UINT>(frameIndex_ & 0xFFFFu);
+        h264Pic.PictureOrderCountNumber = static_cast<UINT>(frameIndex_);
+        h264Pic.FrameDecodingOrderNumber = static_cast<UINT>(frameIndex_);
+        h264Pic.TemporalLayerIndex = 0;
+
+        if (!idr && hasReferenceFrame_) {
+            h264RefDesc.ReconstructedPictureResourceIndex = 0;
+            h264RefDesc.IsLongTermReference = FALSE;
+            h264RefDesc.LongTermPictureIdx = 0;
+            h264RefDesc.PictureOrderCountNumber = static_cast<UINT>(frameIndex_ - 1);
+            h264RefDesc.FrameDecodingOrderNumber = static_cast<UINT>(frameIndex_ - 1);
+            h264RefDesc.TemporalLayerIndex = 0;
+
+            h264Pic.List0ReferenceFramesCount = 1;
+            h264Pic.pList0ReferenceFrames = &h264List0Index;
+            h264Pic.ReferenceFramesReconPictureDescriptorsCount = 1;
+            h264Pic.pReferenceFramesReconPictureDescriptors = &h264RefDesc;
+            refResource = reconstructedPictures_[previousReconIndex_].Get();
+        }
+
+        picCodecData.DataSize = sizeof(h264Pic);
+        picCodecData.pH264PicData = &h264Pic;
     }
 
-    D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA picCodecData = {};
-    picCodecData.DataSize = sizeof(h264Pic);
-    picCodecData.pH264PicData = &h264Pic;
-
-    D3D12_VIDEO_ENCODE_REFERENCE_FRAMES referenceFrames = {};
     if (refResource) {
         referenceFrames.NumTexture2Ds = 1;
         referenceFrames.ppTexture2Ds = &refResource;
@@ -785,11 +861,11 @@ void D3D12VideoEncodeBackend::recordEncodeFrame(ID3D12Resource* resource, D3D12_
 
     transitionVideo(encoderMetadataBuffer_.Get(), D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ);
 
-    H264ProfileStorage profile;
+    CodecProfileStorage profile(desc_.codec, desc_.internalFormat);
     D3D12_VIDEO_ENCODER_RESOLVE_METADATA_INPUT_ARGUMENTS resolveInput = {};
-    resolveInput.EncoderCodec = D3D12_VIDEO_ENCODER_CODEC_H264;
+    resolveInput.EncoderCodec = d3d_codec(desc_.codec);
     resolveInput.EncoderProfile = profile.desc;
-    resolveInput.EncoderInputFormat = DXGI_FORMAT_NV12;
+    resolveInput.EncoderInputFormat = ToDxgiFormat(desc_.internalFormat);
     resolveInput.EncodedPictureEffectiveResolution = { desc_.width, desc_.height };
     resolveInput.HWLayoutMetadata.pBuffer = encoderMetadataBuffer_.Get();
     resolveInput.HWLayoutMetadata.Offset = 0;

@@ -19,10 +19,7 @@ public:
     D3D12VideoEncodeBitstreamWriter(const D3D12VideoEncodeBitstreamWriter&) = delete;
     D3D12VideoEncodeBitstreamWriter& operator=(const D3D12VideoEncodeBitstreamWriter&) = delete;
 
-    // Backward-compatible elementary-stream-only entry point.
-    // Prefer the metadata overload below for MP4/MKV output.
     void open(const std::wstring& outputPath);
-
     void open(
         const std::wstring& outputPath,
         uint32_t width,
