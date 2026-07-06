@@ -4,6 +4,8 @@
 
 #include <d3d12video.h>
 #include <Windows.h>
+#include <D3D12Helper/D3D12Core/D3D12Barrier.hpp>
+#include <D3D12Helper/D3D12Framework/D3D12Helpers.hpp>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -12,6 +14,7 @@
 #include <cstring>
 #include <sstream>
 #include <string>
+#include <utility>
 
 namespace D3DVideoEncoderLib {
 namespace {
@@ -30,6 +33,34 @@ void throw_hr(HRESULT hr, const char* what) {
         oss << what << " failed. HRESULT=" << hr_hex(hr);
         throw D3DVideoEncoderError(oss.str());
     }
+}
+
+
+D3D12CoreLib::Processing::ProcessingColorMatrix ToProcessingMatrix(VideoColorMatrix matrix) noexcept {
+    switch (matrix) {
+    case VideoColorMatrix::BT601: return D3D12CoreLib::Processing::ProcessingColorMatrix::BT601;
+    case VideoColorMatrix::BT709: return D3D12CoreLib::Processing::ProcessingColorMatrix::BT709;
+    case VideoColorMatrix::BT2020: return D3D12CoreLib::Processing::ProcessingColorMatrix::BT2020;
+    default: return D3D12CoreLib::Processing::ProcessingColorMatrix::BT709;
+    }
+}
+
+D3D12CoreLib::Processing::ProcessingColorRange ToProcessingRange(VideoColorRange range) noexcept {
+    switch (range) {
+    case VideoColorRange::Full: return D3D12CoreLib::Processing::ProcessingColorRange::Full;
+    case VideoColorRange::Limited: return D3D12CoreLib::Processing::ProcessingColorRange::Limited;
+    default: return D3D12CoreLib::Processing::ProcessingColorRange::Limited;
+    }
+}
+
+std::string FormatDxgi(DXGI_FORMAT format) {
+    std::ostringstream oss;
+    oss << static_cast<int>(format);
+    return oss.str();
+}
+
+bool RectEqualsFull(const D3D12CoreLib::Processing::ProcessingRect& r, UINT width, UINT height) noexcept {
+    return r.x == 0 && r.y == 0 && r.width == width && r.height == height;
 }
 
 uint64_t align_up_u64(uint64_t value, uint64_t alignment) noexcept {
@@ -185,12 +216,71 @@ D3D12VideoEncodeBackend::~D3D12VideoEncodeBackend() {
     try { close(); } catch (...) {}
 }
 
+
+bool D3D12VideoEncodeBackend::inputAlreadyMatchesInternalFormat() const noexcept {
+    return desc_.input.inputFormat == ToDxgiFormat(desc_.internalFormat);
+}
+
+uint32_t D3D12VideoEncodeBackend::sourceWidth() const noexcept {
+    return desc_.input.sourceWidth != 0 ? desc_.input.sourceWidth : desc_.width;
+}
+
+uint32_t D3D12VideoEncodeBackend::sourceHeight() const noexcept {
+    return desc_.input.sourceHeight != 0 ? desc_.input.sourceHeight : desc_.height;
+}
+
+D3D12CoreLib::Processing::ProcessingRect D3D12VideoEncodeBackend::resolvedSourceRect() const {
+    const UINT srcW = sourceWidth();
+    const UINT srcH = sourceHeight();
+    if (srcW == 0 || srcH == 0) {
+        throw D3DVideoEncoderError("D3D12VideoEncodeBackend sourceWidth/sourceHeight must resolve to non-zero values.");
+    }
+
+    if (desc_.input.sourceRect.isEmpty()) {
+        return { 0, 0, srcW, srcH };
+    }
+
+    const auto& r = desc_.input.sourceRect;
+    if (r.x < 0 || r.y < 0 || r.width == 0 || r.height == 0 ||
+        static_cast<uint64_t>(r.x) + r.width > srcW ||
+        static_cast<uint64_t>(r.y) + r.height > srcH) {
+        std::ostringstream oss;
+        oss << "D3D12VideoEncodeBackend sourceRect is outside the source texture. source="
+            << srcW << "x" << srcH
+            << " rect=(" << r.x << "," << r.y << "," << r.width << "," << r.height << ")";
+        throw D3DVideoEncoderError(oss.str());
+    }
+    return { r.x, r.y, r.width, r.height };
+}
+
+bool D3D12VideoEncodeBackend::needsResizeOrCrop() const {
+    const auto rect = resolvedSourceRect();
+    return !RectEqualsFull(rect, sourceWidth(), sourceHeight()) ||
+           rect.width != desc_.width ||
+           rect.height != desc_.height;
+}
+
+bool D3D12VideoEncodeBackend::inputIsRgbaLike() const noexcept {
+    return D3D12CoreLib::Processing::IsRgbaLikeFormat(desc_.input.inputFormat);
+}
+
+D3D12CoreLib::Processing::ProcessingFilter D3D12VideoEncodeBackend::processingFilter() const noexcept {
+    switch (desc_.input.resizeFilter) {
+    case VideoProcessingFilter::Point: return D3D12CoreLib::Processing::ProcessingFilter::Point;
+    case VideoProcessingFilter::Linear: return D3D12CoreLib::Processing::ProcessingFilter::Linear;
+    default: return D3D12CoreLib::Processing::ProcessingFilter::Linear;
+    }
+}
+
 void D3D12VideoEncodeBackend::initialize(const D3D12VideoEncoderDesc& desc) {
     desc_ = desc;
     validateDesc();
     queryVideoDevice();
     queryEncodeSupport();
     queryResourceRequirements();
+    if (useProcessing_) {
+        initializeProcessingIfNeeded();
+    }
     createEncoderObjects();
     createQueuesAndCommands();
     createBuffers();
@@ -199,10 +289,12 @@ void D3D12VideoEncodeBackend::initialize(const D3D12VideoEncoderDesc& desc) {
     writer_.open(desc_.outputPath);
 
     open_ = true;
-    log_.info("D3D12VideoEncodeBackend Phase 2 initialized: H.264/NV12 elementary stream output");
+    log_.info(useProcessing_
+        ? "D3D12VideoEncodeBackend initialized with D3D12Processing RGB/crop/resize -> NV12 path"
+        : "D3D12VideoEncodeBackend initialized with direct H.264/NV12 input path");
 }
 
-void D3D12VideoEncodeBackend::validateDesc() const {
+void D3D12VideoEncodeBackend::validateDesc() {
     if (!desc_.input.core) {
         throw D3DVideoEncoderError("D3D12VideoEncodeBackend requires desc.input.core.");
     }
@@ -212,11 +304,6 @@ void D3D12VideoEncodeBackend::validateDesc() const {
     if (desc_.internalFormat != VideoPixelFormat::NV12) {
         throw D3DVideoEncoderError("D3D12VideoEncodeBackend Phase 2 supports only internalFormat=NV12.");
     }
-    if (desc_.input.inputFormat != DXGI_FORMAT_NV12) {
-        throw D3DVideoEncoderError(
-            "D3D12VideoEncodeBackend Phase 2 requires direct NV12 input. "
-            "RGB input through D3D12Processing will be connected after the native H.264/NV12 path is stable.");
-    }
     if (desc_.asyncMode) {
         throw D3DVideoEncoderError("D3D12VideoEncodeBackend Phase 2 is synchronous only. Async will be enabled after the native path is stable.");
     }
@@ -225,6 +312,35 @@ void D3D12VideoEncodeBackend::validateDesc() const {
     }
     if ((desc_.width % 2) != 0 || (desc_.height % 2) != 0 || desc_.width == 0 || desc_.height == 0) {
         throw D3DVideoEncoderError("D3D12VideoEncodeBackend Phase 2 requires non-zero even width/height.");
+    }
+    if (sourceWidth() == 0 || sourceHeight() == 0) {
+        throw D3DVideoEncoderError("D3D12VideoEncodeBackend sourceWidth/sourceHeight resolved to zero.");
+    }
+
+    const bool directNv12 = inputAlreadyMatchesInternalFormat();
+    const bool rgbaLike = inputIsRgbaLike();
+    const bool resizeOrCrop = needsResizeOrCrop();
+    useProcessing_ = !directNv12 || resizeOrCrop;
+
+    if (directNv12 && resizeOrCrop) {
+        throw D3DVideoEncoderError(
+            "D3D12VideoEncodeBackend direct NV12 crop/resize is not supported yet. "
+            "Use RGB-like input for crop/resize, or provide an already-sized NV12 texture.");
+    }
+    if (!directNv12 && !rgbaLike) {
+        std::ostringstream oss;
+        oss << "D3D12VideoEncodeBackend input.inputFormat is unsupported for Phase 4. "
+            << "Direct path requires NV12; conversion path requires RGBA-like input. inputFormat="
+            << FormatDxgi(desc_.input.inputFormat);
+        throw D3DVideoEncoderError(oss.str());
+    }
+    if (useProcessing_ && !desc_.input.allowFormatConversion) {
+        throw D3DVideoEncoderError(
+            "D3D12VideoEncodeBackend requires D3D12Processing because the input format/size/crop does not directly match NV12 encode input, "
+            "but desc.input.allowFormatConversion=false.");
+    }
+    if (useProcessing_ && !rgbaLike) {
+        throw D3DVideoEncoderError("D3D12VideoEncodeBackend D3D12Processing path currently requires RGB-like input.");
     }
 }
 
@@ -402,6 +518,158 @@ void D3D12VideoEncodeBackend::createFences() {
     ID3D12Device* device = desc_.input.core->GetDevice();
     throw_hr(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&videoFence_)), "Create video fence");
     throw_hr(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&copyFence_)), "Create copy fence");
+}
+
+
+void D3D12VideoEncodeBackend::initializeProcessingIfNeeded() {
+    auto& core = *desc_.input.core;
+    cbvSrvUavAllocator_.Initialize(core.GetDevice(),
+                                   D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                                   desc_.input.cbvSrvUavDescriptorCount,
+                                   true);
+    samplerAllocator_.Initialize(core.GetDevice(),
+                                 D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+                                 desc_.input.samplerDescriptorCount,
+                                 true);
+    processingContext_.Initialize(core,
+                                  &cbvSrvUavAllocator_,
+                                  &samplerAllocator_,
+                                  desc_.input.processingShaderDirectory);
+    formatConverter_.Initialize(processingContext_);
+    resizer_.Initialize(processingContext_);
+    fusedProcessor_.Initialize(processingContext_);
+    processingCommandContext_ = core.CreateDirectContext();
+
+    if (needsResizeOrCrop()) {
+        resizedTexture_ = resizer_.CreateOutputTexture(
+            core,
+            desc_.width,
+            desc_.height,
+            desc_.input.inputFormat,
+            D3D12_RESOURCE_STATE_COMMON);
+        resizedTextureState_ = D3D12_RESOURCE_STATE_COMMON;
+    }
+
+    convertedTexture_ = formatConverter_.CreateOutputTexture(
+        core,
+        desc_.width,
+        desc_.height,
+        DXGI_FORMAT_NV12,
+        D3D12_RESOURCE_STATE_COMMON);
+    convertedTextureState_ = D3D12_RESOURCE_STATE_COMMON;
+}
+
+void D3D12VideoEncodeBackend::validateInputResource(ID3D12Resource* resource) const {
+    if (!resource) {
+        throw D3DVideoEncoderError("D3D12VideoEncodeBackend encode received a null ID3D12Resource.");
+    }
+
+    const D3D12_RESOURCE_DESC rd = resource->GetDesc();
+    if (rd.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        rd.Width != sourceWidth() ||
+        rd.Height != sourceHeight() ||
+        rd.Format != desc_.input.inputFormat) {
+        std::ostringstream oss;
+        oss << "D3D12VideoEncodeBackend input resource mismatch. expected="
+            << sourceWidth() << "x" << sourceHeight()
+            << " inputFormat=" << FormatDxgi(desc_.input.inputFormat)
+            << " actual=" << static_cast<uint64_t>(rd.Width) << "x" << rd.Height
+            << " format=" << FormatDxgi(rd.Format);
+        throw D3DVideoEncoderError(oss.str());
+    }
+
+    Microsoft::WRL::ComPtr<ID3D12Device> resourceDevice;
+    resource->GetDevice(IID_PPV_ARGS(&resourceDevice));
+    if (resourceDevice.Get() != desc_.input.core->GetDevice()) {
+        throw D3DVideoEncoderError("D3D12VideoEncodeBackend input resource belongs to a different ID3D12Device than desc.input.core.");
+    }
+}
+
+ID3D12Resource* D3D12VideoEncodeBackend::convertToInternalFormat(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState) {
+    validateInputResource(resource);
+
+    auto& core = *desc_.input.core;
+    if (processingFenceValue_ != 0) {
+        core.DirectQueue().WaitForFenceValue(processingFenceValue_);
+        processingFenceValue_ = 0;
+    }
+
+    cbvSrvUavAllocator_.Reset();
+    samplerAllocator_.Reset();
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> srcComPtr;
+    srcComPtr = resource;
+    D3D12CoreLib::D3D12Resource src(std::move(srcComPtr), currentState);
+
+    const auto srcRect = resolvedSourceRect();
+    D3D12CoreLib::D3D12Resource* convertSource = &src;
+    D3D12_RESOURCE_STATES convertSourceState = currentState;
+
+    processingCommandContext_.Reset();
+
+    if (needsResizeOrCrop()) {
+        D3D12CoreLib::Processing::D3D12ProcessingStateDesc resizeStates = {};
+        resizeStates.useExplicitStates = true;
+        resizeStates.srcBefore = currentState;
+        resizeStates.srcAfter = currentState;
+        resizeStates.dstBefore = resizedTextureState_;
+        resizeStates.dstAfter = D3D12_RESOURCE_STATE_COMMON;
+
+        if (desc_.input.preferFusedResize) {
+            D3D12CoreLib::Processing::FusedConvertResizeDesc fused = {};
+            fused.srcFormat = desc_.input.inputFormat;
+            fused.dstFormat = desc_.input.inputFormat;
+            fused.color.srcMatrix = ToProcessingMatrix(desc_.colorMatrix);
+            fused.color.dstMatrix = ToProcessingMatrix(desc_.colorMatrix);
+            fused.color.srcRange = ToProcessingRange(desc_.colorRange);
+            fused.color.dstRange = ToProcessingRange(desc_.colorRange);
+            fused.color.alphaMode = D3D12CoreLib::Processing::ProcessingAlphaMode::Ignore;
+            fused.filter = processingFilter();
+            fused.srcRect = srcRect;
+            fused.dstRect = { 0, 0, desc_.width, desc_.height };
+            fusedProcessor_.RecordConvertResize(processingCommandContext_, src, resizedTexture_, fused, resizeStates);
+        } else {
+            D3D12CoreLib::Processing::ResizeDesc resize = {};
+            resize.filter = processingFilter();
+            resize.srcRect = srcRect;
+            resize.dstRect = { 0, 0, desc_.width, desc_.height };
+            resizer_.RecordResize(processingCommandContext_, src, resizedTexture_, resize, resizeStates);
+        }
+
+        resizedTextureState_ = D3D12_RESOURCE_STATE_COMMON;
+        convertSource = &resizedTexture_;
+        convertSourceState = D3D12_RESOURCE_STATE_COMMON;
+    }
+
+    D3D12CoreLib::Processing::FormatConvertDesc convert = {};
+    convert.srcFormat = desc_.input.inputFormat;
+    convert.dstFormat = DXGI_FORMAT_NV12;
+    convert.color.srcMatrix = ToProcessingMatrix(desc_.colorMatrix);
+    convert.color.dstMatrix = ToProcessingMatrix(desc_.colorMatrix);
+    convert.color.srcRange = ToProcessingRange(desc_.colorRange);
+    convert.color.dstRange = ToProcessingRange(desc_.colorRange);
+    convert.color.alphaMode = D3D12CoreLib::Processing::ProcessingAlphaMode::Ignore;
+    convert.srcRect = { 0, 0, desc_.width, desc_.height };
+    convert.dstRect = { 0, 0, desc_.width, desc_.height };
+
+    D3D12CoreLib::Processing::D3D12ProcessingStateDesc convertStates = {};
+    convertStates.useExplicitStates = true;
+    convertStates.srcBefore = convertSourceState;
+    convertStates.srcAfter = convertSourceState;
+    convertStates.dstBefore = convertedTextureState_;
+    convertStates.dstAfter = D3D12_RESOURCE_STATE_COMMON;
+
+    formatConverter_.RecordConvert(processingCommandContext_, *convertSource, convertedTexture_, convert, convertStates);
+    processingCommandContext_.Close();
+
+    ID3D12CommandList* lists[] = { processingCommandContext_.GetCommandList() };
+    core.DirectQueue().ExecuteCommandLists(1, lists);
+    processingFenceValue_ = core.DirectQueue().Signal();
+    core.DirectQueue().WaitForFenceValue(processingFenceValue_);
+    processingFenceValue_ = 0;
+    convertedTextureState_ = D3D12_RESOURCE_STATE_COMMON;
+
+    return convertedTexture_.Get();
 }
 
 void D3D12VideoEncodeBackend::transitionVideo(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
@@ -625,9 +893,20 @@ void D3D12VideoEncodeBackend::encode(ID3D12Resource* resource, D3D12_RESOURCE_ST
         throw D3DVideoEncoderError("D3D12VideoEncodeBackend::encode received a null resource.");
     }
 
+    ID3D12Resource* encodeResource = resource;
+    D3D12_RESOURCE_STATES encodeState = currentState;
+    bool restoreEncodeResourceState = desc_.input.restoreStateAfterEncode;
+    if (useProcessing_) {
+        encodeResource = convertToInternalFormat(resource, currentState);
+        encodeState = D3D12_RESOURCE_STATE_COMMON;
+        restoreEncodeResourceState = true;
+    } else {
+        validateInputResource(resource);
+    }
+
     throw_hr(videoAllocator_->Reset(), "videoAllocator Reset");
     throw_hr(videoCommandList_->Reset(videoAllocator_.Get()), "videoCommandList Reset");
-    recordEncodeFrame(resource, currentState, desc_.input.restoreStateAfterEncode);
+    recordEncodeFrame(encodeResource, encodeState, restoreEncodeResourceState);
     throw_hr(videoCommandList_->Close(), "videoCommandList Close");
 
     ID3D12CommandList* lists[] = { videoCommandList_.Get() };
@@ -637,6 +916,10 @@ void D3D12VideoEncodeBackend::encode(ID3D12Resource* resource, D3D12_RESOURCE_ST
     copyOutputsToReadback();
     waitForCopyQueue();
     writeResolvedBitstream(timestamp100ns, duration100ns);
+
+    if (useProcessing_) {
+        convertedTextureState_ = D3D12_RESOURCE_STATE_COMMON;
+    }
 
     hasReferenceFrame_ = true;
     ++frameIndex_;
@@ -649,7 +932,13 @@ void D3D12VideoEncodeBackend::flush() {
 }
 
 void D3D12VideoEncodeBackend::destroyObjects() noexcept {
+    if (processingFenceValue_ != 0 && desc_.input.core) {
+        desc_.input.core->DirectQueue().WaitForFenceValue(processingFenceValue_);
+        processingFenceValue_ = 0;
+    }
     writer_.close();
+    convertedTexture_ = {};
+    resizedTexture_ = {};
     for (auto& recon : reconstructedPictures_) recon.Reset();
     resolvedMetadataReadback_.Reset();
     resolvedMetadataBuffer_.Reset();

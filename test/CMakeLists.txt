@@ -144,6 +144,7 @@ endif()
 if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
     list(APPEND D3DVIDEOENCODER_TEST_TARGETS
         D3DVideoEncoder_test_d3d12_video_encode_h264_nv12_smoke
+        D3DVideoEncoder_test_d3d12_video_encode_rgba_h264_mp4_smoke
     )
 
     add_executable(D3DVideoEncoder_test_d3d12_video_encode_h264_nv12_smoke
@@ -151,6 +152,15 @@ if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
     )
     target_link_libraries(D3DVideoEncoder_test_d3d12_video_encode_h264_nv12_smoke PRIVATE D3DVideoEncoder::D3DVideoEncoder)
     target_include_directories(D3DVideoEncoder_test_d3d12_video_encode_h264_nv12_smoke PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_BINARY_DIR}"
+    )
+
+    add_executable(D3DVideoEncoder_test_d3d12_video_encode_rgba_h264_mp4_smoke
+        test_d3d12_video_encode_rgba_h264_mp4_smoke.cpp
+    )
+    target_link_libraries(D3DVideoEncoder_test_d3d12_video_encode_rgba_h264_mp4_smoke PRIVATE D3DVideoEncoder::D3DVideoEncoder)
+    target_include_directories(D3DVideoEncoder_test_d3d12_video_encode_rgba_h264_mp4_smoke PRIVATE
         "${PROJECT_SOURCE_DIR}/src"
         "${CMAKE_CURRENT_BINARY_DIR}"
     )
@@ -193,7 +203,9 @@ endif()
 if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
     add_test(NAME D3D12VideoEncodeCapabilities COMMAND D3DVideoEncoder_test_d3d12_video_encode_capabilities)
     add_test(NAME D3D12VideoEncodeH264Nv12Smoke COMMAND D3DVideoEncoder_test_d3d12_video_encode_h264_nv12_smoke)
+    add_test(NAME D3D12VideoEncodeRgbaH264Mp4Smoke COMMAND D3DVideoEncoder_test_d3d12_video_encode_rgba_h264_mp4_smoke)
     set_tests_properties(D3D12VideoEncodeH264Nv12Smoke PROPERTIES WORKING_DIRECTORY "$<TARGET_FILE_DIR:D3DVideoEncoder_test_d3d12_video_encode_h264_nv12_smoke>")
+    set_tests_properties(D3D12VideoEncodeRgbaH264Mp4Smoke PROPERTIES WORKING_DIRECTORY "$<TARGET_FILE_DIR:D3DVideoEncoder_test_d3d12_video_encode_rgba_h264_mp4_smoke>")
 endif()
 
 set_tests_properties(D3D11EncodeSmoke PROPERTIES WORKING_DIRECTORY "$<TARGET_FILE_DIR:D3DVideoEncoder_test_d3d11_encode_smoke>")

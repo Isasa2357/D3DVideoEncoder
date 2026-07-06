@@ -5,6 +5,11 @@
 #include "backend/d3d12video/ID3D12VideoEncodeBackend.hpp"
 #include "util/DebugLog.hpp"
 
+#include <D3D12Helper/D3D12Core/D3D12CommandContext.hpp>
+#include <D3D12Helper/D3D12Framework/D3D12DescriptorAllocator.hpp>
+#include <D3D12Helper/D3D12Framework/D3D12Resource.hpp>
+#include <D3D12Helper/D3D12Processing/D3D12Processing.hpp>
+
 #include <wrl/client.h>
 
 #include <array>
@@ -34,16 +39,27 @@ public:
     void close() override;
 
 private:
-    void validateDesc() const;
+    void validateDesc();
     void queryVideoDevice();
     void queryEncodeSupport();
     void queryResourceRequirements();
+    void initializeProcessingIfNeeded();
     void createEncoderObjects();
     void createQueuesAndCommands();
     void createBuffers();
     void createReconstructedPictures();
     void createFences();
     void destroyObjects() noexcept;
+
+    bool inputAlreadyMatchesInternalFormat() const noexcept;
+    uint32_t sourceWidth() const noexcept;
+    uint32_t sourceHeight() const noexcept;
+    D3D12CoreLib::Processing::ProcessingRect resolvedSourceRect() const;
+    bool needsResizeOrCrop() const;
+    bool inputIsRgbaLike() const noexcept;
+    D3D12CoreLib::Processing::ProcessingFilter processingFilter() const noexcept;
+    void validateInputResource(ID3D12Resource* resource) const;
+    ID3D12Resource* convertToInternalFormat(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState);
 
     void recordEncodeFrame(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState, bool restoreInputState);
     void copyOutputsToReadback();
@@ -102,6 +118,20 @@ private:
     bool hasReferenceFrame_ = false;
 
     D3D12VideoEncodeBitstreamWriter writer_;
+
+    bool useProcessing_ = false;
+    D3D12CoreLib::D3D12DescriptorAllocator cbvSrvUavAllocator_;
+    D3D12CoreLib::D3D12DescriptorAllocator samplerAllocator_;
+    D3D12CoreLib::Processing::D3D12ProcessingContext processingContext_;
+    D3D12CoreLib::Processing::D3D12FormatConverter formatConverter_;
+    D3D12CoreLib::Processing::D3D12Resizer resizer_;
+    D3D12CoreLib::Processing::D3D12FusedProcessor fusedProcessor_;
+    D3D12CoreLib::D3D12CommandContext processingCommandContext_;
+    D3D12CoreLib::D3D12Resource resizedTexture_;
+    D3D12_RESOURCE_STATES resizedTextureState_ = D3D12_RESOURCE_STATE_COMMON;
+    D3D12CoreLib::D3D12Resource convertedTexture_;
+    D3D12_RESOURCE_STATES convertedTextureState_ = D3D12_RESOURCE_STATE_COMMON;
+    UINT64 processingFenceValue_ = 0;
     bool open_ = false;
 };
 

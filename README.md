@@ -28,7 +28,7 @@
 | D3D12 + Media Foundation | 未対応。将来実装 |
 | NVENC D3D11 | `D3DVIDEOENCODER_ENABLE_NVENC=ON` 時に対応。`.h264` / `.h265` elementary stream と `.mp4` / `.mkv` mux出力に対応。resource/register pool化済み |
 | NVENC D3D12 | `D3DVIDEOENCODER_ENABLE_NVENC=ON` 時に対応。NV12/P010直接入力、またはD3D12ProcessingによるRGB→NV12/P010変換。`.h264` / `.h265` / `.mp4` / `.mkv` 出力に対応。async write と resource/register pool化済み |
-| native D3D12 Video Encode | `D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE=ON` 時にbackend scaffoldをビルド。実フレームエンコード/bitstream出力は未完了 |
+| native D3D12 Video Encode | `D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE=ON` 時に対応。H.264/NV12直接入力、D3D12ProcessingによるRGBA8/BGRA8/RGBA16F→NV12変換、`.h264` / `.mp4` / `.mkv` 出力に対応。HEVC/P010、async、B-frameは未対応 |
 | AV1 | NVENC SDK/GPU依存。初期実装ではH.264/HEVCを主対象 |
 
 ---
@@ -363,11 +363,22 @@ ID3D12Resource
   -> H.264 / HEVC / AV1
 ```
 
-native `D3D12VideoEncode` backendは、CMake optionとbackend classを追加済みです。ただし現段階では、`ID3D12VideoDevice` の取得とdesc検証までを行うbackend scaffoldであり、フレームエンコード、bitstream出力、muxは未完了です。
+native `D3D12VideoEncode` backendは、H.264/NV12の最小実エンコード経路に対応しています。入力がすでに `NV12` の場合は直接encodeし、`RGBA8` / `BGRA8` / `RGBA16F` の場合は D3D12Processing で `NV12` へ変換してからencodeします。
 
 ```bat
 cmake -S . -B out/build/default ^
   -DD3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE=ON
+```
+
+現在の制約です。
+
+```text
+- codec は H.264 のみ
+- internalFormat は NV12 のみ
+- 出力は .h264 / .264 / .mp4 / .mkv
+- RGB入力は RGBA8 / BGRA8 / RGBA16F から D3D12Processing で NV12 へ変換
+- HEVC/P010、AV1、async write、B-frame は未対応
+- direct NV12/P010 入力に対する crop/resize は未対応
 ```
 
 `D3DVIDEOENCODER_ENABLE_NVENC=OFF` の場合、`NvencD3D12` は未有効backendとして `D3DVideoEncoderError` を投げます。`MediaFoundation` はD3D12では引き続き未対応です。
@@ -389,6 +400,9 @@ D3D12UnsupportedBackend
 D3D11EncodeSmoke
 D3D11EncodeAsyncSmoke
 D3D11MediaFoundationCapabilities
+D3D12VideoEncodeCapabilities
+D3D12VideoEncodeH264Nv12Smoke
+D3D12VideoEncodeRgbaH264Mp4Smoke
 ```
 
 `D3D11EncodeSmoke` は、D3D11Helperで作成した `BGRA8` textureを `D3D11VideoEncoder` に渡し、Media Foundation backendで H.264 MP4 を生成します。その後、生成されたMP4を Media Foundation Source Reader で読み返し、動画streamの幅・高さ・sample数を検証します。
@@ -408,6 +422,8 @@ NvencD3D12RgbaH264Mp4Smoke
 ```
 
 `NvencD3D12RgbaH264Mp4Smoke` は `asyncMode=true` で実行し、D3D12ProcessingによるRGBA→NV12変換、D3D12 worker queue、NVENC resource/register pool、MP4 muxを同時に通します。
+
+`D3D12VideoEncodeRgbaH264Mp4Smoke` は native D3D12 Video Encode backendで `RGBA8 -> D3D12Processing -> NV12 -> H.264 -> MP4` を通します。native D3D12 Video Encode非対応環境ではskipします。
 
 また、通常テストに `D3D11HevcP010Smoke` を追加しています。これはMedia Foundation capability queryでHEVC/P010 encoderが見つかる環境だけ実エンコードを行い、未対応環境ではskipします。
 
