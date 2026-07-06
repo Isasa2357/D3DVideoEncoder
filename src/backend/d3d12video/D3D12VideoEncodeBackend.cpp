@@ -312,6 +312,10 @@ bool D3D12VideoEncodeBackend::inputIsRgbaLike() const noexcept {
     return D3D12CoreLib::Processing::IsRgbaLikeFormat(desc_.input.inputFormat);
 }
 
+bool D3D12VideoEncodeBackend::inputIsDirectYuvWithProcessing() const noexcept {
+    return inputAlreadyMatchesInternalFormat() && D3D12CoreLib::Processing::IsYuv420Format(desc_.input.inputFormat);
+}
+
 D3D12CoreLib::Processing::ProcessingFilter D3D12VideoEncodeBackend::processingFilter() const noexcept {
     switch (desc_.input.resizeFilter) {
     case VideoProcessingFilter::Point: return D3D12CoreLib::Processing::ProcessingFilter::Point;
@@ -338,7 +342,9 @@ void D3D12VideoEncodeBackend::initialize(const D3D12VideoEncoderDesc& desc) {
 
     open_ = true;
     log_.info(useProcessing_
-        ? "D3D12VideoEncodeBackend initialized with D3D12Processing RGB/crop/resize -> encode format path"
+        ? (inputIsDirectYuvWithProcessing()
+            ? "D3D12VideoEncodeBackend initialized with D3D12Processing direct YUV crop/resize -> encode format path"
+            : "D3D12VideoEncodeBackend initialized with D3D12Processing RGB/crop/resize -> encode format path")
         : "D3D12VideoEncodeBackend initialized with direct native D3D12 Video Encode input path");
 }
 
@@ -367,14 +373,18 @@ void D3D12VideoEncodeBackend::validateDesc() {
 
     const bool directMatch = inputAlreadyMatchesInternalFormat();
     const bool rgbaLike = inputIsRgbaLike();
+    const bool directYuv = inputIsDirectYuvWithProcessing();
     const bool resizeOrCrop = needsResizeOrCrop();
     useProcessing_ = !directMatch || resizeOrCrop;
 
-    if (directMatch && resizeOrCrop) {
-        throw D3DVideoEncoderError(
-            "D3D12VideoEncodeBackend direct NV12/P010 crop/resize is not supported yet. "
-            "Use RGB-like input for crop/resize, or provide an already-sized encode-format texture.");
+    if (directYuv && resizeOrCrop) {
+        const auto r = resolvedSourceRect();
+        if ((r.x % 2) != 0 || (r.y % 2) != 0 || (r.width % 2) != 0 || (r.height % 2) != 0) {
+            throw D3DVideoEncoderError(
+                "D3D12VideoEncodeBackend direct NV12/P010 crop/resize requires even sourceRect x/y/width/height.");
+        }
     }
+
     if (!directMatch && !rgbaLike) {
         std::ostringstream oss;
         oss << "D3D12VideoEncodeBackend input.inputFormat is unsupported. "
@@ -387,8 +397,9 @@ void D3D12VideoEncodeBackend::validateDesc() {
             "D3D12VideoEncodeBackend requires D3D12Processing because the input format/size/crop does not directly match encode input, "
             "but desc.input.allowFormatConversion=false.");
     }
-    if (useProcessing_ && !rgbaLike) {
-        throw D3DVideoEncoderError("D3D12VideoEncodeBackend D3D12Processing path currently requires RGB-like input.");
+    if (useProcessing_ && !rgbaLike && !(directYuv && resizeOrCrop)) {
+        throw D3DVideoEncoderError(
+            "D3D12VideoEncodeBackend D3D12Processing path requires either RGB-like input or direct NV12/P010 input with crop/resize.");
     }
 }
 
@@ -588,7 +599,15 @@ void D3D12VideoEncodeBackend::initializeProcessingIfNeeded() {
     fusedProcessor_.Initialize(processingContext_);
     processingCommandContext_ = core.CreateDirectContext();
 
-    if (needsResizeOrCrop()) {
+    if (inputIsDirectYuvWithProcessing() && needsResizeOrCrop()) {
+        yuvToRgbaTexture_ = formatConverter_.CreateOutputTexture(
+            core,
+            desc_.width,
+            desc_.height,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            D3D12_RESOURCE_STATE_COMMON);
+        yuvToRgbaTextureState_ = D3D12_RESOURCE_STATE_COMMON;
+    } else if (needsResizeOrCrop()) {
         resizedTexture_ = resizer_.CreateOutputTexture(
             core,
             desc_.width,
@@ -651,11 +670,37 @@ ID3D12Resource* D3D12VideoEncodeBackend::convertToInternalFormat(ID3D12Resource*
 
     const auto srcRect = resolvedSourceRect();
     D3D12CoreLib::D3D12Resource* convertSource = &src;
+    DXGI_FORMAT convertSourceFormat = desc_.input.inputFormat;
     D3D12_RESOURCE_STATES convertSourceState = currentState;
 
     processingCommandContext_.Reset();
 
-    if (needsResizeOrCrop()) {
+    if (inputIsDirectYuvWithProcessing() && needsResizeOrCrop()) {
+        D3D12CoreLib::Processing::D3D12ProcessingStateDesc yuvToRgbaStates = {};
+        yuvToRgbaStates.useExplicitStates = true;
+        yuvToRgbaStates.srcBefore = currentState;
+        yuvToRgbaStates.srcAfter = currentState;
+        yuvToRgbaStates.dstBefore = yuvToRgbaTextureState_;
+        yuvToRgbaStates.dstAfter = D3D12_RESOURCE_STATE_COMMON;
+
+        D3D12CoreLib::Processing::FusedConvertResizeDesc yuvToRgba = {};
+        yuvToRgba.srcFormat = desc_.input.inputFormat;
+        yuvToRgba.dstFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        yuvToRgba.color.srcMatrix = ToProcessingMatrix(desc_.colorMatrix);
+        yuvToRgba.color.dstMatrix = ToProcessingMatrix(desc_.colorMatrix);
+        yuvToRgba.color.srcRange = ToProcessingRange(desc_.colorRange);
+        yuvToRgba.color.dstRange = ToProcessingRange(desc_.colorRange);
+        yuvToRgba.color.alphaMode = D3D12CoreLib::Processing::ProcessingAlphaMode::Ignore;
+        yuvToRgba.filter = processingFilter();
+        yuvToRgba.srcRect = srcRect;
+        yuvToRgba.dstRect = { 0, 0, desc_.width, desc_.height };
+        fusedProcessor_.RecordConvertResize(processingCommandContext_, src, yuvToRgbaTexture_, yuvToRgba, yuvToRgbaStates);
+
+        yuvToRgbaTextureState_ = D3D12_RESOURCE_STATE_COMMON;
+        convertSource = &yuvToRgbaTexture_;
+        convertSourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        convertSourceState = D3D12_RESOURCE_STATE_COMMON;
+    } else if (needsResizeOrCrop()) {
         D3D12CoreLib::Processing::D3D12ProcessingStateDesc resizeStates = {};
         resizeStates.useExplicitStates = true;
         resizeStates.srcBefore = currentState;
@@ -686,11 +731,12 @@ ID3D12Resource* D3D12VideoEncodeBackend::convertToInternalFormat(ID3D12Resource*
 
         resizedTextureState_ = D3D12_RESOURCE_STATE_COMMON;
         convertSource = &resizedTexture_;
+        convertSourceFormat = desc_.input.inputFormat;
         convertSourceState = D3D12_RESOURCE_STATE_COMMON;
     }
 
     D3D12CoreLib::Processing::FormatConvertDesc convert = {};
-    convert.srcFormat = desc_.input.inputFormat;
+    convert.srcFormat = convertSourceFormat;
     convert.dstFormat = ToDxgiFormat(desc_.internalFormat);
     convert.color.srcMatrix = ToProcessingMatrix(desc_.colorMatrix);
     convert.color.dstMatrix = ToProcessingMatrix(desc_.colorMatrix);
@@ -996,6 +1042,7 @@ void D3D12VideoEncodeBackend::encode(ID3D12Resource* resource, D3D12_RESOURCE_ST
 
     if (useProcessing_) {
         convertedTextureState_ = D3D12_RESOURCE_STATE_COMMON;
+        yuvToRgbaTextureState_ = D3D12_RESOURCE_STATE_COMMON;
     }
 
     hasReferenceFrame_ = true;
@@ -1015,6 +1062,7 @@ void D3D12VideoEncodeBackend::destroyObjects() noexcept {
     }
     writer_.close();
     convertedTexture_ = {};
+    yuvToRgbaTexture_ = {};
     resizedTexture_ = {};
     for (auto& recon : reconstructedPictures_) recon.Reset();
     resolvedMetadataReadback_.Reset();
