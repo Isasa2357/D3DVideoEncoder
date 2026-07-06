@@ -4,6 +4,7 @@ set(D3DVIDEOENCODER_TEST_TARGETS
     D3DVideoEncoder_test_desc_validation
     D3DVideoEncoder_test_hresult
     D3DVideoEncoder_test_encode_job_queue
+    D3DVideoEncoder_test_d3d12_encode_job_queue
     D3DVideoEncoder_test_d3d12_unsupported_backend
     D3DVideoEncoder_test_d3d11_encode_smoke
     D3DVideoEncoder_test_d3d11_encode_async_smoke
@@ -38,6 +39,12 @@ add_executable(D3DVideoEncoder_test_encode_job_queue
 )
 target_link_libraries(D3DVideoEncoder_test_encode_job_queue PRIVATE D3DVideoEncoder::D3DVideoEncoder)
 target_include_directories(D3DVideoEncoder_test_encode_job_queue PRIVATE "${PROJECT_SOURCE_DIR}/src")
+
+add_executable(D3DVideoEncoder_test_d3d12_encode_job_queue
+    test_d3d12_encode_job_queue.cpp
+)
+target_link_libraries(D3DVideoEncoder_test_d3d12_encode_job_queue PRIVATE D3DVideoEncoder::D3DVideoEncoder)
+target_include_directories(D3DVideoEncoder_test_d3d12_encode_job_queue PRIVATE "${PROJECT_SOURCE_DIR}/src")
 
 add_executable(D3DVideoEncoder_test_d3d12_unsupported_backend
     test_d3d12_unsupported_backend.cpp
@@ -141,6 +148,7 @@ add_test(NAME Types COMMAND D3DVideoEncoder_test_types)
 add_test(NAME DescValidation COMMAND D3DVideoEncoder_test_desc_validation)
 add_test(NAME HResult COMMAND D3DVideoEncoder_test_hresult)
 add_test(NAME EncodeJobQueue COMMAND D3DVideoEncoder_test_encode_job_queue)
+add_test(NAME D3D12EncodeJobQueue COMMAND D3DVideoEncoder_test_d3d12_encode_job_queue)
 add_test(NAME D3D12UnsupportedBackend COMMAND D3DVideoEncoder_test_d3d12_unsupported_backend)
 add_test(NAME D3D11EncodeSmoke COMMAND D3DVideoEncoder_test_d3d11_encode_smoke)
 add_test(NAME D3D11EncodeAsyncSmoke COMMAND D3DVideoEncoder_test_d3d11_encode_async_smoke)

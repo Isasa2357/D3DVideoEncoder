@@ -1,3 +1,4 @@
+#include <D3DVideoEncoder/D3DVideoEncoder.hpp>
 #include <D3DVideoEncoder/D3DVideoEncoderTypes.hpp>
 
 #include <cstdlib>
@@ -41,6 +42,19 @@ int main() {
     require_true(std::string(ToString(VideoCodec::HEVC)) == "HEVC", "HEVC ToString");
     require_true(std::string(ToString(VideoPixelFormat::P010)) == "P010", "P010 ToString");
     require_true(std::string(ToString(VideoProcessingFilter::Linear)) == "Linear", "Linear filter ToString");
+
+    using D3D11VariableDurationWrite = void (D3D11VideoEncoder::*)(ID3D11Texture2D*, int64_t, int64_t);
+    using D3D12VariableDurationWrite = void (D3D12VideoEncoder::*)(ID3D12Resource*, D3D12_RESOURCE_STATES, int64_t, int64_t);
+    using WrapperD3D11VariableDurationWrite = void (D3DVideoEncoder::*)(ID3D11Texture2D*, int64_t, int64_t);
+    using WrapperD3D12VariableDurationWrite = void (D3DVideoEncoder::*)(ID3D12Resource*, D3D12_RESOURCE_STATES, int64_t, int64_t);
+    D3D11VariableDurationWrite d3d11VariableWrite = &D3D11VideoEncoder::write;
+    D3D12VariableDurationWrite d3d12VariableWrite = &D3D12VideoEncoder::write;
+    WrapperD3D11VariableDurationWrite wrapperD3D11VariableWrite = &D3DVideoEncoder::write;
+    WrapperD3D12VariableDurationWrite wrapperD3D12VariableWrite = &D3DVideoEncoder::write;
+    (void)d3d11VariableWrite;
+    (void)d3d12VariableWrite;
+    (void)wrapperD3D11VariableWrite;
+    (void)wrapperD3D12VariableWrite;
 
     VideoProcessingRect emptyRect;
     require_true(emptyRect.isEmpty(), "default VideoProcessingRect means full source");

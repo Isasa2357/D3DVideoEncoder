@@ -166,6 +166,7 @@ set(D3DVIDEOENCODER_PRIVATE_HEADERS
     src/backend/UnsupportedEncoderBackend.hpp
     src/input/D3D11VideoInputAdapter.hpp
     src/async/EncodeJobQueue.hpp
+    src/async/D3D12EncodeJobQueue.hpp
     src/surface/D3D11EncodeSurfacePool.hpp
     src/surface/EncodeSurface.hpp
     src/util/DebugLog.hpp
@@ -185,6 +186,7 @@ set(D3DVIDEOENCODER_SOURCES
     src/backend/UnsupportedEncoderBackend.cpp
     src/input/D3D11VideoInputAdapter.cpp
     src/async/EncodeJobQueue.cpp
+    src/async/D3D12EncodeJobQueue.cpp
     src/surface/D3D11EncodeSurfacePool.cpp
     src/util/DebugLog.cpp
     src/util/HResult.cpp

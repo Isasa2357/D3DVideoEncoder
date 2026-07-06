@@ -288,7 +288,7 @@ encoder.close();
 - 出力は .h264 / .h265 の elementary stream、または .mp4 / .mkv mux
 - asyncMode=true の場合、D3D12 resourceは内部queueが ComPtr で保持し、worker threadでencodeする
 - D3D12Processingを使う場合、内部でDirectQueueへ変換コマンドを投入し、NVENC投入前にfence待ちする
-- 入力がNV12/P010直接入力の場合、resource state は D3D12_RESOURCE_STATE_COMMON を要求
+- 入力がNV12/P010直接入力の場合も、write() に渡された currentState から内部で COMMON へ遷移できる
 - 入力がRGB系の場合、write()へ渡された currentState から変換し、変換後scratchをCOMMONでNVENCへ渡す
 - NVENC resource registration はセッション内でpool化し、同じresourceを毎フレームregister/unregisterしない
 ```
@@ -319,6 +319,24 @@ desc.input.restoreStateAfterEncode = false;
 ```
 
 制約として、現時点のcrop/resizeはRGB系入力向けです。直接 `NV12/P010` 入力に対するcrop/resizeは未対応です。
+
+---
+
+## Variable duration / explicit timestamps
+
+固定fpsの通常 `write()` に加えて、明示timestampとdurationを指定できます。
+可変fps、欠落フレームを含む入力、外部clockに同期した録画ではこの overload を使います。
+
+```cpp
+// D3D11
+encoder.write(texture, timestamp100ns, duration100ns);
+
+// D3D12
+encoder.write(resource, currentState, timestamp100ns, duration100ns);
+```
+
+`timestamp100ns` は従来通り単調増加が必須です。`duration100ns` は正の値である必要があります。
+Media Foundation backendでは `IMFSample::SetSampleDuration()` に渡され、NVENC backendではMP4/MKV muxのsample durationへ反映されます。`.h264` / `.h265` elementary stream出力ではコンテナがないためduration情報は保持されません。
 
 ---
 
@@ -452,13 +470,11 @@ git push
 
 1. native D3D12 Video Encode backend の実フレームエンコード/bitstream出力
 2. D3D12 + Media Foundation backend の再検討
-3. D3D12 direct NV12/P010 path のstate管理改善
-4. 可変duration API
-5. AV1 mux / AV1詳細tuning
+3. AV1 mux / AV1詳細tuning
 
 
 ## Recent stability improvements
 
 The D3D11 Media Foundation backend now reports failures with encoder context such as codec, input format, frame size, frame rate, bitrate, hardware-transform settings, and the Media Foundation call that failed.  It also checks Media Foundation encoder capabilities before constructing the sink writer so unsupported HEVC/P010 environments fail with a clear message.
 
-The D3D11 encode surface pool now tracks active surfaces with per-pool generations, waits for all outstanding surfaces during flush/close, releases surfaces if input preparation fails, and returns dropped `DropOldest` queue jobs to the encoder so their surfaces are released correctly. D3D12VideoEncoder now supports async write with a ComPtr-backed D3D12 job queue, and NVENC DirectX resource registration is pooled for the lifetime of the encoder session.
+The D3D11 encode surface pool now tracks active surfaces with per-pool generations, waits for all outstanding surfaces during flush/close, releases surfaces if input preparation fails, and returns dropped `DropOldest` queue jobs to the encoder so their surfaces are released correctly. D3D12VideoEncoder now supports async write with a ComPtr-backed D3D12 job queue, and NVENC DirectX resource registration is pooled for the lifetime of the encoder session. Variable-duration `write(..., timestamp100ns, duration100ns)` overloads are available for D3D11, D3D12, and the compatibility wrapper.

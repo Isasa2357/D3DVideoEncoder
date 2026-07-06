@@ -30,6 +30,11 @@ void D3DVideoEncoder::write(ID3D11Texture2D* texture, int64_t timestamp100ns) {
     d3d11_->write(texture, timestamp100ns);
 }
 
+void D3DVideoEncoder::write(ID3D11Texture2D* texture, int64_t timestamp100ns, int64_t duration100ns) {
+    if (!d3d11_) throw D3DVideoEncoderError("write(ID3D11Texture2D*) called on non-D3D11 encoder.");
+    d3d11_->write(texture, timestamp100ns, duration100ns);
+}
+
 void D3DVideoEncoder::write(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState) {
     if (!d3d12_) throw D3DVideoEncoderError("write(ID3D12Resource*) called on non-D3D12 encoder.");
     d3d12_->write(resource, currentState);
@@ -38,6 +43,11 @@ void D3DVideoEncoder::write(ID3D12Resource* resource, D3D12_RESOURCE_STATES curr
 void D3DVideoEncoder::write(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState, int64_t timestamp100ns) {
     if (!d3d12_) throw D3DVideoEncoderError("write(ID3D12Resource*) called on non-D3D12 encoder.");
     d3d12_->write(resource, currentState, timestamp100ns);
+}
+
+void D3DVideoEncoder::write(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState, int64_t timestamp100ns, int64_t duration100ns) {
+    if (!d3d12_) throw D3DVideoEncoderError("write(ID3D12Resource*) called on non-D3D12 encoder.");
+    d3d12_->write(resource, currentState, timestamp100ns, duration100ns);
 }
 
 void D3DVideoEncoder::flush() {

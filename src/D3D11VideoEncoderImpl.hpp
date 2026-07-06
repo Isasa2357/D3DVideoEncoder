@@ -22,6 +22,7 @@ public:
 
     void write(ID3D11Texture2D* texture);
     void write(ID3D11Texture2D* texture, int64_t timestamp100ns);
+    void write(ID3D11Texture2D* texture, int64_t timestamp100ns, int64_t duration100ns);
 
     void flush();
     void close();

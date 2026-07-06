@@ -23,6 +23,10 @@ void D3D12VideoEncoder::write(ID3D12Resource* resource, D3D12_RESOURCE_STATES cu
     impl_->write(resource, currentState, timestamp100ns);
 }
 
+void D3D12VideoEncoder::write(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState, int64_t timestamp100ns, int64_t duration100ns) {
+    impl_->write(resource, currentState, timestamp100ns, duration100ns);
+}
+
 void D3D12VideoEncoder::flush() {
     impl_->flush();
 }

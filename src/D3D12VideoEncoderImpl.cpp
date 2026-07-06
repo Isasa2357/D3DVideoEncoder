@@ -10,6 +10,7 @@
 #endif
 
 #include <string>
+#include <utility>
 
 namespace D3DVideoEncoderLib {
 
@@ -27,6 +28,10 @@ D3D12VideoEncoder::Impl::Impl(const D3D12VideoEncoderDesc& desc)
     if (desc_.backend == D3DVideoEncoderBackendType::NvencD3D12) {
         nvencBackend_ = createNvencD3D12Backend();
         nvencBackend_->initialize(desc_);
+        if (desc_.asyncMode) {
+            jobQueue_.initialize(desc_.queueDepth, desc_.queueFullPolicy);
+            startWorkerIfNeeded();
+        }
         open_ = true;
         return;
     }
@@ -36,6 +41,10 @@ D3D12VideoEncoder::Impl::Impl(const D3D12VideoEncoderDesc& desc)
     if (desc_.backend == D3DVideoEncoderBackendType::D3D12VideoEncode) {
         d3d12VideoEncodeBackend_ = createD3D12VideoEncodeBackend();
         d3d12VideoEncodeBackend_->initialize(desc_);
+        if (desc_.asyncMode) {
+            jobQueue_.initialize(desc_.queueDepth, desc_.queueFullPolicy);
+            startWorkerIfNeeded();
+        }
         open_ = true;
         return;
     }
@@ -121,40 +130,132 @@ std::unique_ptr<ID3D12VideoEncodeBackend> D3D12VideoEncoder::Impl::createD3D12Vi
 }
 #endif
 
+void D3D12VideoEncoder::Impl::encodeNow(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState, int64_t timestamp100ns, int64_t duration100ns) {
+#ifdef D3DVIDEOENCODER_HAS_NVENC
+    if (nvencBackend_) {
+        nvencBackend_->encode(resource, currentState, timestamp100ns, duration100ns);
+        return;
+    }
+#endif
+#ifdef D3DVIDEOENCODER_HAS_D3D12_VIDEO_ENCODE
+    if (d3d12VideoEncodeBackend_) {
+        d3d12VideoEncodeBackend_->encode(resource, currentState, timestamp100ns, duration100ns);
+        return;
+    }
+#endif
+    throwBackendNotImplemented();
+}
+
+void D3D12VideoEncoder::Impl::encodeOrQueue(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState, int64_t timestamp100ns, int64_t duration100ns) {
+    if (!resource) {
+        throw D3DVideoEncoderError("D3D12VideoEncoder::write received a null ID3D12Resource.");
+    }
+
+    if (!desc_.asyncMode) {
+        encodeNow(resource, currentState, timestamp100ns, duration100ns);
+        return;
+    }
+
+    D3D12EncodeJob job;
+    job.resource = resource;
+    job.currentState = currentState;
+    job.timestamp100ns = timestamp100ns;
+    job.duration100ns = duration100ns;
+
+    D3D12EncodeJob droppedJob;
+    if (!jobQueue_.push(std::move(job), &droppedJob)) {
+        // DropNewest rejected the frame. The write call is still considered handled,
+        // matching D3D11VideoEncoder queue-full semantics.
+        return;
+    }
+    // DropOldest returns a job here; destroying droppedJob releases its ComPtr.
+    throwWorkerExceptionIfSet();
+}
+
+void D3D12VideoEncoder::Impl::releasePendingJobs(std::vector<D3D12EncodeJob>& jobs) {
+    jobs.clear();
+}
+
+void D3D12VideoEncoder::Impl::throwWorkerExceptionIfSet() {
+    if (workerErrorSet_.load()) {
+        std::rethrow_exception(workerException_);
+    }
+}
+
+void D3D12VideoEncoder::Impl::startWorkerIfNeeded() {
+    worker_ = std::thread([this]() { workerMain(); });
+}
+
+void D3D12VideoEncoder::Impl::workerMain() {
+    try {
+        D3D12EncodeJob job;
+        while (jobQueue_.pop(job)) {
+            try {
+                encodeNow(job.resource.Get(), job.currentState, job.timestamp100ns, job.duration100ns);
+            } catch (...) {
+                jobQueue_.jobDone();
+                throw;
+            }
+            jobQueue_.jobDone();
+        }
+    } catch (...) {
+        workerException_ = std::current_exception();
+        workerErrorSet_.store(true);
+        auto pending = jobQueue_.cancelPending();
+        releasePendingJobs(pending);
+    }
+}
+
+void D3D12VideoEncoder::Impl::stopWorker() {
+    if (!desc_.asyncMode) return;
+
+    if (workerErrorSet_.load()) {
+        auto pending = jobQueue_.cancelPending();
+        releasePendingJobs(pending);
+    } else {
+        jobQueue_.waitDrained();
+        jobQueue_.close();
+    }
+
+    if (worker_.joinable()) {
+        worker_.join();
+    }
+    throwWorkerExceptionIfSet();
+}
+
 void D3D12VideoEncoder::Impl::write(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState) {
     const int64_t timestamp = timestampGenerator_.nextTimestamp100ns();
     write(resource, currentState, timestamp);
 }
 
 void D3D12VideoEncoder::Impl::write(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState, int64_t timestamp100ns) {
+    write(resource, currentState, timestamp100ns, timestampGenerator_.frameDuration100ns());
+}
+
+void D3D12VideoEncoder::Impl::write(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState, int64_t timestamp100ns, int64_t duration100ns) {
     if (!open_) {
         throwBackendNotImplemented();
     }
+    throwWorkerExceptionIfSet();
     if (timestamp100ns <= lastTimestamp100ns_) {
         throw D3DVideoEncoderError("timestamp100ns must be strictly increasing.");
     }
-
-#ifdef D3DVIDEOENCODER_HAS_NVENC
-    if (nvencBackend_) {
-        nvencBackend_->encode(resource, currentState, timestamp100ns, timestampGenerator_.frameDuration100ns());
-        lastTimestamp100ns_ = timestamp100ns;
-        ++writtenFrameCount_;
-        return;
+    if (duration100ns <= 0) {
+        throw D3DVideoEncoderError("duration100ns must be positive.");
     }
-#endif
-#ifdef D3DVIDEOENCODER_HAS_D3D12_VIDEO_ENCODE
-    if (d3d12VideoEncodeBackend_) {
-        d3d12VideoEncodeBackend_->encode(resource, currentState, timestamp100ns, timestampGenerator_.frameDuration100ns());
-        lastTimestamp100ns_ = timestamp100ns;
-        ++writtenFrameCount_;
-        return;
-    }
-#endif
 
-    throwBackendNotImplemented();
+    encodeOrQueue(resource, currentState, timestamp100ns, duration100ns);
+    lastTimestamp100ns_ = timestamp100ns;
+    ++writtenFrameCount_;
 }
 
 void D3D12VideoEncoder::Impl::flush() {
+    if (!open_) return;
+    throwWorkerExceptionIfSet();
+    if (desc_.asyncMode) {
+        jobQueue_.waitDrained();
+        throwWorkerExceptionIfSet();
+    }
 #ifdef D3DVIDEOENCODER_HAS_NVENC
     if (nvencBackend_) {
         nvencBackend_->flush();
@@ -169,17 +270,37 @@ void D3D12VideoEncoder::Impl::flush() {
 
 void D3D12VideoEncoder::Impl::close() {
     if (!open_) return;
-#ifdef D3DVIDEOENCODER_HAS_NVENC
-    if (nvencBackend_) {
-        nvencBackend_->close();
+
+    std::exception_ptr pendingException = nullptr;
+    try {
+        stopWorker();
+    } catch (...) {
+        pendingException = std::current_exception();
     }
+
+    try {
+#ifdef D3DVIDEOENCODER_HAS_NVENC
+        if (nvencBackend_) {
+            nvencBackend_->close();
+        }
 #endif
 #ifdef D3DVIDEOENCODER_HAS_D3D12_VIDEO_ENCODE
-    if (d3d12VideoEncodeBackend_) {
-        d3d12VideoEncodeBackend_->close();
-    }
+        if (d3d12VideoEncodeBackend_) {
+            d3d12VideoEncodeBackend_->close();
+        }
 #endif
+    } catch (...) {
+        if (!pendingException) {
+            pendingException = std::current_exception();
+        }
+    }
+
     open_ = false;
+    log_.info("D3D12VideoEncoder closed");
+
+    if (pendingException) {
+        std::rethrow_exception(pendingException);
+    }
 }
 
 } // namespace D3DVideoEncoderLib

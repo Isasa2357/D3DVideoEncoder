@@ -107,6 +107,10 @@ void D3D11VideoEncoder::Impl::write(ID3D11Texture2D* texture) {
 }
 
 void D3D11VideoEncoder::Impl::write(ID3D11Texture2D* texture, int64_t timestamp100ns) {
+    write(texture, timestamp100ns, timestampGenerator_.frameDuration100ns());
+}
+
+void D3D11VideoEncoder::Impl::write(ID3D11Texture2D* texture, int64_t timestamp100ns, int64_t duration100ns) {
     if (!open_) {
         throw D3DVideoEncoderError("write() called after close().");
     }
@@ -114,9 +118,12 @@ void D3D11VideoEncoder::Impl::write(ID3D11Texture2D* texture, int64_t timestamp1
     if (timestamp100ns <= lastTimestamp100ns_) {
         throw D3DVideoEncoderError("timestamp100ns must be strictly increasing.");
     }
+    if (duration100ns <= 0) {
+        throw D3DVideoEncoderError("duration100ns must be positive.");
+    }
 
     EncodeSurface surface = input_.prepare(texture);
-    encodeOrQueue(surface, timestamp100ns, timestampGenerator_.frameDuration100ns());
+    encodeOrQueue(surface, timestamp100ns, duration100ns);
     lastTimestamp100ns_ = timestamp100ns;
     ++writtenFrameCount_;
 }

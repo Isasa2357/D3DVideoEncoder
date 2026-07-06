@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <fstream>
 #include <string>
+#include <vector>
+#include <wrl/client.h>
 
 namespace D3DVideoEncoderLib {
 
@@ -72,6 +74,17 @@ public:
     bool isOpen() const noexcept { return encoder_ != nullptr; }
 
 private:
+    struct RegisteredInputResource {
+        // Raw ID3D11Texture2D*/ID3D12Resource* used as the lookup key.
+        void* resourceKey = nullptr;
+
+        // Handle returned by nvEncRegisterResource.
+        void* registeredResource = nullptr;
+
+        // Keeps the original DirectX resource alive while it is registered with NVENC.
+        Microsoft::WRL::ComPtr<IUnknown> keepAlive;
+    };
+
     GUID codecGuid() const;
     GUID profileGuid() const;
     GUID presetGuid() const;
@@ -82,12 +95,15 @@ private:
     void createBitstreamBuffer();
     void destroyBitstreamBuffer() noexcept;
     void writeBitstream(void* bitstreamBuffer);
+    RegisteredInputResource& getOrRegisterResource(void* resource);
+    void unregisterAllResources() noexcept;
 
     NvencApi api_;
     NvencSessionDesc desc_ = {};
     void* encoder_ = nullptr;
     void* bitstreamBuffer_ = nullptr;
     NvencOutputMuxer muxer_;
+    std::vector<RegisteredInputResource> registeredResources_;
     bool eosSent_ = false;
     int64_t currentTimestamp100ns_ = 0;
     int64_t currentDuration100ns_ = 0;

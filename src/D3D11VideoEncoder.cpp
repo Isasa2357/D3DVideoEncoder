@@ -167,6 +167,10 @@ void D3D11VideoEncoder::write(ID3D11Texture2D* texture, int64_t timestamp100ns) 
     impl_->write(texture, timestamp100ns);
 }
 
+void D3D11VideoEncoder::write(ID3D11Texture2D* texture, int64_t timestamp100ns, int64_t duration100ns) {
+    impl_->write(texture, timestamp100ns, duration100ns);
+}
+
 void D3D11VideoEncoder::flush() {
     impl_->flush();
 }

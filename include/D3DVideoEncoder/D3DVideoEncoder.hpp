@@ -24,9 +24,11 @@ public:
 
     void write(ID3D11Texture2D* texture);
     void write(ID3D11Texture2D* texture, int64_t timestamp100ns);
+    void write(ID3D11Texture2D* texture, int64_t timestamp100ns, int64_t duration100ns);
 
     void write(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState);
     void write(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState, int64_t timestamp100ns);
+    void write(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState, int64_t timestamp100ns, int64_t duration100ns);
 
     void flush();
     void close();

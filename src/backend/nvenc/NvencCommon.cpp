@@ -253,9 +253,13 @@ GUID NvencEncoderSession::profileGuid() const {
 }
 
 GUID NvencEncoderSession::presetGuid() const {
-#ifdef NV_ENC_PRESET_P5_GUID
+#if defined(NVENCAPI_MAJOR_VERSION) && (NVENCAPI_MAJOR_VERSION >= 10)
+    // Video Codec SDK 10+ uses the P1-P7 preset GUIDs.  These GUIDs are
+    // static GUID constants rather than preprocessor macros, so #ifdef on
+    // NV_ENC_PRESET_P5_GUID is not reliable with newer SDKs.
     return NV_ENC_PRESET_P5_GUID;
 #else
+    // Legacy SDK fallback. Older headers define the default preset GUID.
     return NV_ENC_PRESET_DEFAULT_GUID;
 #endif
 }
@@ -386,6 +390,53 @@ void NvencEncoderSession::destroyBitstreamBuffer() noexcept {
     }
 }
 
+NvencEncoderSession::RegisteredInputResource& NvencEncoderSession::getOrRegisterResource(void* resource) {
+    for (auto& entry : registeredResources_) {
+        if (entry.resourceKey == resource) {
+            return entry;
+        }
+    }
+
+    NV_ENC_REGISTER_RESOURCE reg = {};
+    reg.version = NV_ENC_REGISTER_RESOURCE_VER;
+    reg.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
+    reg.resourceToRegister = resource;
+    reg.width = desc_.width;
+    reg.height = desc_.height;
+    reg.pitch = 0;
+    reg.bufferFormat = bufferFormat();
+    reg.bufferUsage = NV_ENC_INPUT_IMAGE;
+    D3DVE_THROW_IF_NVENC_FAILED_MSG(api_.functions().nvEncRegisterResource(encoder_, &reg), describe() + ": nvEncRegisterResource");
+
+    RegisteredInputResource entry;
+    entry.resourceKey = resource;
+    entry.registeredResource = reg.registeredResource;
+
+    // ID3D11Texture2D and ID3D12Resource are COM interfaces. Keep an IUnknown
+    // reference so resources queued asynchronously or reused by the NVENC pool
+    // cannot be destroyed while still registered with NVENC.
+    auto* unknown = reinterpret_cast<IUnknown*>(resource);
+    if (unknown) {
+        (void)unknown->QueryInterface(IID_PPV_ARGS(entry.keepAlive.GetAddressOf()));
+    }
+
+    registeredResources_.push_back(std::move(entry));
+    return registeredResources_.back();
+}
+
+void NvencEncoderSession::unregisterAllResources() noexcept {
+    if (encoder_) {
+        for (auto& entry : registeredResources_) {
+            if (entry.registeredResource) {
+                api_.functions().nvEncUnregisterResource(encoder_, entry.registeredResource);
+                entry.registeredResource = nullptr;
+            }
+            entry.keepAlive.Reset();
+        }
+    }
+    registeredResources_.clear();
+}
+
 void NvencEncoderSession::writeBitstream(void* bitstreamBuffer) {
     NV_ENC_LOCK_BITSTREAM lock = {};
     lock.version = NV_ENC_LOCK_BITSTREAM_VER;
@@ -417,24 +468,13 @@ void NvencEncoderSession::encodeDirectXResource(void* resource, int64_t timestam
         throw D3DVideoEncoderError("NVENC encode received a null resource.");
     }
 
-    NV_ENC_REGISTER_RESOURCE reg = {};
-    reg.version = NV_ENC_REGISTER_RESOURCE_VER;
-    reg.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
-    reg.resourceToRegister = resource;
-    reg.width = desc_.width;
-    reg.height = desc_.height;
-    reg.pitch = 0;
-    reg.bufferFormat = bufferFormat();
-    reg.bufferUsage = NV_ENC_INPUT_IMAGE;
-    D3DVE_THROW_IF_NVENC_FAILED_MSG(api_.functions().nvEncRegisterResource(encoder_, &reg), describe() + ": nvEncRegisterResource");
-
-    void* registeredResource = reg.registeredResource;
+    auto& registered = getOrRegisterResource(resource);
     void* mappedResource = nullptr;
 
     try {
         NV_ENC_MAP_INPUT_RESOURCE map = {};
         map.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
-        map.registeredResource = registeredResource;
+        map.registeredResource = registered.registeredResource;
         D3DVE_THROW_IF_NVENC_FAILED_MSG(api_.functions().nvEncMapInputResource(encoder_, &map), describe() + ": nvEncMapInputResource");
         mappedResource = map.mappedResource;
 
@@ -461,14 +501,9 @@ void NvencEncoderSession::encodeDirectXResource(void* resource, int64_t timestam
 
         D3DVE_THROW_IF_NVENC_FAILED_MSG(api_.functions().nvEncUnmapInputResource(encoder_, mappedResource), describe() + ": nvEncUnmapInputResource");
         mappedResource = nullptr;
-        D3DVE_THROW_IF_NVENC_FAILED_MSG(api_.functions().nvEncUnregisterResource(encoder_, registeredResource), describe() + ": nvEncUnregisterResource");
-        registeredResource = nullptr;
     } catch (...) {
         if (mappedResource) {
             api_.functions().nvEncUnmapInputResource(encoder_, mappedResource);
-        }
-        if (registeredResource) {
-            api_.functions().nvEncUnregisterResource(encoder_, registeredResource);
         }
         throw;
     }
@@ -508,6 +543,7 @@ void NvencEncoderSession::close() {
     }
 
     destroyBitstreamBuffer();
+    unregisterAllResources();
 
     if (encoder_) {
         api_.functions().nvEncDestroyEncoder(encoder_);
