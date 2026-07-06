@@ -41,9 +41,7 @@ include(D3DVideoEncoderDxcRuntime)
 # External dependencies
 # -----------------------------------------------------------------------------
 # D3D11VideoEncoder uses D3D11Helper for D3D11 resource creation and Processing.
-# D3D12Helper is still fetched because the public D3D12VideoEncoder API references
-# D3D12Core and future D3D12 backends will use it. D3D12 is no longer routed
-# through D3D11/Media Foundation interop.
+# D3D12Helper is used by D3D12VideoEncoder, NvencD3D12, and native D3D12 Video Encode.
 
 set(D3D11HELPER_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
 set(D3D11HELPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -141,7 +139,7 @@ else()
 endif()
 
 if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
-    message(STATUS "D3DVideoEncoder: native D3D12 Video Encode backend phase1 capability query enabled")
+    message(STATUS "D3DVideoEncoder: native D3D12 Video Encode backend enabled")
 else()
     message(STATUS "D3DVideoEncoder: native D3D12 Video Encode backend disabled")
 endif()
@@ -192,6 +190,7 @@ set(D3DVIDEOENCODER_SOURCES
     src/util/HResult.cpp
     src/util/TimestampGenerator.cpp
 )
+
 if(D3DVIDEOENCODER_HAS_NVENC)
     list(APPEND D3DVIDEOENCODER_PRIVATE_HEADERS
         src/backend/nvenc/NvencCommon.hpp
@@ -214,6 +213,7 @@ if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
         src/backend/d3d12video/D3D12VideoEncodeBackend.hpp
         src/backend/d3d12video/D3D12VideoEncodeCapabilities.hpp
         src/backend/d3d12video/D3D12VideoEncodeBitstreamWriter.hpp
+        src/backend/d3d12video/D3D12VideoEncodeFrameScheduler.hpp
     )
     list(APPEND D3DVIDEOENCODER_SOURCES
         src/backend/d3d12video/D3D12VideoEncodeBackend.cpp
@@ -221,7 +221,6 @@ if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
         src/backend/d3d12video/D3D12VideoEncodeBitstreamWriter.cpp
     )
 endif()
-
 
 add_library(D3DVideoEncoder STATIC
     ${D3DVIDEOENCODER_PUBLIC_HEADERS}
@@ -279,6 +278,11 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/src" PREFIX "Source" FILES ${D3DV
 
 if(D3DVIDEOENCODER_BUILD_SAMPLE)
     add_subdirectory(sample/01_encode_d3d11_texture)
+    if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
+        add_subdirectory(sample/02_d3d12_video_encode_h264_rgb_mp4)
+        add_subdirectory(sample/03_d3d12_video_encode_hevc_p010_mp4)
+        add_subdirectory(sample/04_d3d12_video_encode_capability_dump)
+    endif()
 endif()
 
 if(D3DVIDEOENCODER_BUILD_TESTS)
