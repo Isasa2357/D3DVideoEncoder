@@ -41,6 +41,20 @@ public:
         VideoPixelFormat inputFormat);
     static NvencCapabilities QueryNvencCapabilities(D3D12CoreLib::D3D12Core* core);
 
+    // Query native D3D12 Video Encode support on the D3D12 device. This works
+    // only when the library was built with D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE=ON;
+    // otherwise supported=false is returned with an explanatory message.
+    static D3D12VideoEncodeFormatCapability QueryD3D12VideoEncodeSupport(
+        D3D12CoreLib::D3D12Core* core,
+        VideoCodec codec,
+        VideoPixelFormat inputFormat,
+        uint32_t width,
+        uint32_t height);
+    static D3D12VideoEncodeCapabilities QueryD3D12VideoEncodeCapabilities(
+        D3D12CoreLib::D3D12Core* core,
+        uint32_t width,
+        uint32_t height);
+
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;

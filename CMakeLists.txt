@@ -141,7 +141,7 @@ else()
 endif()
 
 if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
-    message(STATUS "D3DVideoEncoder: native D3D12 Video Encode backend scaffold enabled")
+    message(STATUS "D3DVideoEncoder: native D3D12 Video Encode backend phase1 capability query enabled")
 else()
     message(STATUS "D3DVideoEncoder: native D3D12 Video Encode backend disabled")
 endif()
@@ -212,9 +212,11 @@ if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
     list(APPEND D3DVIDEOENCODER_PRIVATE_HEADERS
         src/backend/d3d12video/ID3D12VideoEncodeBackend.hpp
         src/backend/d3d12video/D3D12VideoEncodeBackend.hpp
+        src/backend/d3d12video/D3D12VideoEncodeCapabilities.hpp
     )
     list(APPEND D3DVIDEOENCODER_SOURCES
         src/backend/d3d12video/D3D12VideoEncodeBackend.cpp
+        src/backend/d3d12video/D3D12VideoEncodeCapabilities.cpp
     )
 endif()
 

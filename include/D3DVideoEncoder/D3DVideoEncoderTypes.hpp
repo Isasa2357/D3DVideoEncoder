@@ -106,6 +106,50 @@ struct NvencCapabilities {
     bool supportsAv1P010() const noexcept { return av1P010.supported; }
 };
 
+struct D3D12VideoEncodeFormatCapability {
+    VideoCodec codec = VideoCodec::H264;
+    VideoPixelFormat inputFormat = VideoPixelFormat::NV12;
+    uint32_t requestedWidth = 0;
+    uint32_t requestedHeight = 0;
+
+    bool videoDeviceAvailable = false;
+    bool videoDevice3Available = false;
+    bool featureAreaSupported = false;
+    bool codecSupported = false;
+    bool profileSupported = false;
+    bool inputFormatSupported = false;
+    bool cbrSupported = false;
+    bool cqpSupported = false;
+    bool rateControlSupported = false;
+    bool outputResolutionSupported = false;
+    bool heapSizeSupported = false;
+    bool supported = false;
+
+    uint32_t minWidth = 0;
+    uint32_t minHeight = 0;
+    uint32_t maxWidth = 0;
+    uint32_t maxHeight = 0;
+    uint32_t widthMultiple = 0;
+    uint32_t heightMultiple = 0;
+    uint64_t heapMemoryPoolL0Size = 0;
+    uint64_t heapMemoryPoolL1Size = 0;
+
+    HRESULT queryHr = S_OK;
+    std::string message;
+
+    bool canEncode() const noexcept { return supported; }
+};
+
+struct D3D12VideoEncodeCapabilities {
+    D3D12VideoEncodeFormatCapability h264Nv12;
+    D3D12VideoEncodeFormatCapability hevcNv12;
+    D3D12VideoEncodeFormatCapability hevcP010;
+
+    bool supportsH264Nv12() const noexcept { return h264Nv12.supported; }
+    bool supportsHevcNv12() const noexcept { return hevcNv12.supported; }
+    bool supportsHevcP010() const noexcept { return hevcP010.supported; }
+};
+
 inline DXGI_FORMAT ToDxgiFormat(VideoPixelFormat format) noexcept {
     switch (format) {
     case VideoPixelFormat::NV12:    return DXGI_FORMAT_NV12;

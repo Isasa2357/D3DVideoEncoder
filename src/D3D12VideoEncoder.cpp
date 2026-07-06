@@ -5,6 +5,9 @@
 #ifdef D3DVIDEOENCODER_HAS_NVENC
 #include "backend/nvenc/NvencCommon.hpp"
 #endif
+#ifdef D3DVIDEOENCODER_HAS_D3D12_VIDEO_ENCODE
+#include "backend/d3d12video/D3D12VideoEncodeCapabilities.hpp"
+#endif
 
 namespace D3DVideoEncoderLib {
 
@@ -72,6 +75,42 @@ NvencCapabilities D3D12VideoEncoder::QueryNvencCapabilities(D3D12CoreLib::D3D12C
     caps.av1Nv12 = QueryNvencSupport(core, VideoCodec::AV1, VideoPixelFormat::NV12);
     caps.av1P010 = QueryNvencSupport(core, VideoCodec::AV1, VideoPixelFormat::P010);
     return caps;
+}
+
+D3D12VideoEncodeFormatCapability D3D12VideoEncoder::QueryD3D12VideoEncodeSupport(
+    D3D12CoreLib::D3D12Core* core,
+    VideoCodec codec,
+    VideoPixelFormat inputFormat,
+    uint32_t width,
+    uint32_t height) {
+
+    D3D12VideoEncodeFormatCapability result;
+    result.codec = codec;
+    result.inputFormat = inputFormat;
+    result.requestedWidth = width;
+    result.requestedHeight = height;
+#ifdef D3DVIDEOENCODER_HAS_D3D12_VIDEO_ENCODE
+    return QueryD3D12VideoEncodeDeviceSupport(core, codec, inputFormat, width, height);
+#else
+    result.message = "D3DVideoEncoder was built without D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE=ON.";
+    return result;
+#endif
+}
+
+D3D12VideoEncodeCapabilities D3D12VideoEncoder::QueryD3D12VideoEncodeCapabilities(
+    D3D12CoreLib::D3D12Core* core,
+    uint32_t width,
+    uint32_t height) {
+
+#ifdef D3DVIDEOENCODER_HAS_D3D12_VIDEO_ENCODE
+    return QueryD3D12VideoEncodeDeviceCapabilities(core, width, height);
+#else
+    D3D12VideoEncodeCapabilities caps;
+    caps.h264Nv12 = QueryD3D12VideoEncodeSupport(core, VideoCodec::H264, VideoPixelFormat::NV12, width, height);
+    caps.hevcNv12 = QueryD3D12VideoEncodeSupport(core, VideoCodec::HEVC, VideoPixelFormat::NV12, width, height);
+    caps.hevcP010 = QueryD3D12VideoEncodeSupport(core, VideoCodec::HEVC, VideoPixelFormat::P010, width, height);
+    return caps;
+#endif
 }
 
 } // namespace D3DVideoEncoderLib

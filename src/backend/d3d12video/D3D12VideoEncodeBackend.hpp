@@ -3,9 +3,12 @@
 #include "backend/d3d12video/ID3D12VideoEncodeBackend.hpp"
 #include "util/DebugLog.hpp"
 
+#include <D3DVideoEncoder/D3DVideoEncoderTypes.hpp>
+
 #include <wrl/client.h>
 
 struct ID3D12VideoDevice;
+struct ID3D12VideoDevice3;
 
 namespace D3DVideoEncoderLib {
 
@@ -22,10 +25,13 @@ public:
 private:
     void validateDesc() const;
     void queryVideoDevice();
+    void queryEncodeSupport();
 
     DebugLog log_;
     D3D12VideoEncoderDesc desc_ = {};
     Microsoft::WRL::ComPtr<ID3D12VideoDevice> videoDevice_;
+    Microsoft::WRL::ComPtr<ID3D12VideoDevice3> videoDevice3_;
+    D3D12VideoEncodeFormatCapability capability_ = {};
     bool open_ = false;
 };
 
