@@ -149,6 +149,7 @@ if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
         D3DVideoEncoder_test_d3d12_video_encode_nv12_crop_resize_smoke
         D3DVideoEncoder_test_d3d12_video_encode_hevc_p010_smoke
         D3DVideoEncoder_test_d3d12_video_encode_hevc_p010_mp4_smoke
+        D3DVideoEncoder_test_d3d12_video_encode_frame_scheduler
     )
 
     add_executable(D3DVideoEncoder_test_d3d12_video_encode_h264_nv12_smoke
@@ -205,6 +206,15 @@ if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
         "${CMAKE_CURRENT_BINARY_DIR}"
     )
 
+    add_executable(D3DVideoEncoder_test_d3d12_video_encode_frame_scheduler
+        test_d3d12_video_encode_frame_scheduler.cpp
+    )
+    target_link_libraries(D3DVideoEncoder_test_d3d12_video_encode_frame_scheduler PRIVATE D3DVideoEncoder::D3DVideoEncoder)
+    target_include_directories(D3DVideoEncoder_test_d3d12_video_encode_frame_scheduler PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_BINARY_DIR}"
+    )
+
     foreach(tgt IN LISTS D3DVIDEOENCODER_TEST_TARGETS)
         target_compile_definitions(${tgt} PRIVATE D3DVIDEOENCODER_TEST_HAS_D3D12_VIDEO_ENCODE=1)
     endforeach()
@@ -248,6 +258,7 @@ if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
     add_test(NAME D3D12VideoEncodeNv12CropResizeSmoke COMMAND D3DVideoEncoder_test_d3d12_video_encode_nv12_crop_resize_smoke)
     add_test(NAME D3D12VideoEncodeHevcP010Smoke COMMAND D3DVideoEncoder_test_d3d12_video_encode_hevc_p010_smoke)
     add_test(NAME D3D12VideoEncodeHevcP010Mp4Smoke COMMAND D3DVideoEncoder_test_d3d12_video_encode_hevc_p010_mp4_smoke)
+    add_test(NAME D3D12VideoEncodeFrameScheduler COMMAND D3DVideoEncoder_test_d3d12_video_encode_frame_scheduler)
     set_tests_properties(D3D12VideoEncodeH264Nv12Smoke PROPERTIES WORKING_DIRECTORY "$<TARGET_FILE_DIR:D3DVideoEncoder_test_d3d12_video_encode_h264_nv12_smoke>")
     set_tests_properties(D3D12VideoEncodeRgbaH264Mp4Smoke PROPERTIES WORKING_DIRECTORY "$<TARGET_FILE_DIR:D3DVideoEncoder_test_d3d12_video_encode_rgba_h264_mp4_smoke>")
     set_tests_properties(D3D12VideoEncodeH264Nv12AsyncSmoke PROPERTIES WORKING_DIRECTORY "$<TARGET_FILE_DIR:D3DVideoEncoder_test_d3d12_video_encode_h264_nv12_async_smoke>")
