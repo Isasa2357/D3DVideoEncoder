@@ -213,10 +213,12 @@ if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
         src/backend/d3d12video/ID3D12VideoEncodeBackend.hpp
         src/backend/d3d12video/D3D12VideoEncodeBackend.hpp
         src/backend/d3d12video/D3D12VideoEncodeCapabilities.hpp
+        src/backend/d3d12video/D3D12VideoEncodeBitstreamWriter.hpp
     )
     list(APPEND D3DVIDEOENCODER_SOURCES
         src/backend/d3d12video/D3D12VideoEncodeBackend.cpp
         src/backend/d3d12video/D3D12VideoEncodeCapabilities.cpp
+        src/backend/d3d12video/D3D12VideoEncodeBitstreamWriter.cpp
     )
 endif()
 
