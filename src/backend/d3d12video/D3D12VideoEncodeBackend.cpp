@@ -290,8 +290,12 @@ void D3D12VideoEncodeBackend::initialize(const D3D12VideoEncoderDesc& desc) {
 
     open_ = true;
     log_.info(useProcessing_
-        ? "D3D12VideoEncodeBackend initialized with D3D12Processing RGB/crop/resize -> NV12 path"
-        : "D3D12VideoEncodeBackend initialized with direct H.264/NV12 input path");
+        ? (desc_.asyncMode
+            ? "D3D12VideoEncodeBackend initialized with async D3D12Processing RGB/crop/resize -> NV12 path"
+            : "D3D12VideoEncodeBackend initialized with D3D12Processing RGB/crop/resize -> NV12 path")
+        : (desc_.asyncMode
+            ? "D3D12VideoEncodeBackend initialized with async direct H.264/NV12 input path"
+            : "D3D12VideoEncodeBackend initialized with direct H.264/NV12 input path"));
 }
 
 void D3D12VideoEncodeBackend::validateDesc() {
@@ -299,19 +303,16 @@ void D3D12VideoEncodeBackend::validateDesc() {
         throw D3DVideoEncoderError("D3D12VideoEncodeBackend requires desc.input.core.");
     }
     if (desc_.codec != VideoCodec::H264) {
-        throw D3DVideoEncoderError("D3D12VideoEncodeBackend Phase 2 supports only H.264.");
+        throw D3DVideoEncoderError("D3D12VideoEncodeBackend currently supports only H.264.");
     }
     if (desc_.internalFormat != VideoPixelFormat::NV12) {
-        throw D3DVideoEncoderError("D3D12VideoEncodeBackend Phase 2 supports only internalFormat=NV12.");
-    }
-    if (desc_.asyncMode) {
-        throw D3DVideoEncoderError("D3D12VideoEncodeBackend Phase 2 is synchronous only. Async will be enabled after the native path is stable.");
+        throw D3DVideoEncoderError("D3D12VideoEncodeBackend currently supports only internalFormat=NV12.");
     }
     if (desc_.bFrameCount != 0) {
-        throw D3DVideoEncoderError("D3D12VideoEncodeBackend Phase 2 requires bFrameCount=0.");
+        throw D3DVideoEncoderError("D3D12VideoEncodeBackend currently requires bFrameCount=0.");
     }
     if ((desc_.width % 2) != 0 || (desc_.height % 2) != 0 || desc_.width == 0 || desc_.height == 0) {
-        throw D3DVideoEncoderError("D3D12VideoEncodeBackend Phase 2 requires non-zero even width/height.");
+        throw D3DVideoEncoderError("D3D12VideoEncodeBackend requires non-zero even width/height.");
     }
     if (sourceWidth() == 0 || sourceHeight() == 0) {
         throw D3DVideoEncoderError("D3D12VideoEncodeBackend sourceWidth/sourceHeight resolved to zero.");
@@ -329,7 +330,7 @@ void D3D12VideoEncodeBackend::validateDesc() {
     }
     if (!directNv12 && !rgbaLike) {
         std::ostringstream oss;
-        oss << "D3D12VideoEncodeBackend input.inputFormat is unsupported for Phase 4. "
+        oss << "D3D12VideoEncodeBackend input.inputFormat is unsupported. "
             << "Direct path requires NV12; conversion path requires RGBA-like input. inputFormat="
             << FormatDxgi(desc_.input.inputFormat);
         throw D3DVideoEncoderError(oss.str());
