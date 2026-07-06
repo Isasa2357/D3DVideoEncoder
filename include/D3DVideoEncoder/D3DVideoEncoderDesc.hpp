@@ -57,15 +57,34 @@ struct D3D11VideoInputDesc {
 
 struct D3D12VideoInputDesc {
     // D3D12 input is intentionally separated from the D3D11/Media Foundation path.
-    // It is prepared for future NvencD3D12 / D3D12 Video Encode backends.
+    // It is prepared for NvencD3D12 / D3D12 Video Encode backends.
     D3D12CoreLib::D3D12Core* core = nullptr;
 
     DXGI_FORMAT inputFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
     bool allowFormatConversion = true;
 
+    // Source texture extent.  When zero, the encoder output size is used.
+    // This lets callers encode a cropped/resized region from a larger D3D12 texture.
+    uint32_t sourceWidth = 0;
+    uint32_t sourceHeight = 0;
+
+    // Source crop rectangle.  An empty rect means the full source texture.
+    // The crop rectangle is resized to VideoEncoderCommonDesc::width/height when needed.
+    VideoProcessingRect sourceRect = {};
+    VideoProcessingFilter resizeFilter = VideoProcessingFilter::Linear;
+
+    // Prefer D3D12Helper's fused RGBA-like convert+resize pass for the RGB crop/resize
+    // stage when available. RGB->NV12/P010 still uses a final D3D12FormatConverter pass
+    // because the current D3D12Helper fused processor does not output YUV420 textures.
+    bool preferFusedResize = true;
+
+    // For direct NV12/P010 input, transition the resource to COMMON before NVENC and
+    // restore it to the state passed to write() after the synchronous NVENC submission.
+    bool restoreStateAfterEncode = true;
+
     std::filesystem::path processingShaderDirectory = L"shaders/D3D12Processing";
 
-    // Conservative defaults for future D3D12Processing/NVENC/D3D12 Video Encode implementations.
+    // Conservative defaults for D3D12Processing/NVENC/D3D12 Video Encode implementations.
     uint32_t cbvSrvUavDescriptorCount = 256;
     uint32_t samplerDescriptorCount = 16;
 };

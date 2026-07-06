@@ -23,9 +23,18 @@ public:
 
 private:
     bool inputAlreadyMatchesInternalFormat() const noexcept;
+    uint32_t sourceWidth() const noexcept;
+    uint32_t sourceHeight() const noexcept;
+    D3D12CoreLib::Processing::ProcessingRect resolvedSourceRect() const;
+    bool needsResizeOrCrop() const;
+    bool inputIsRgbaLike() const noexcept;
+    D3D12CoreLib::Processing::ProcessingFilter processingFilter() const noexcept;
     void validateInputResource(ID3D12Resource* resource) const;
-    void validateDirectNvencResource(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState) const;
+    void validateDirectNvencResource(ID3D12Resource* resource) const;
     void initializeProcessingIfNeeded();
+    void transitionResourceBlocking(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
+    ID3D12Resource* prepareDirectNvencResource(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState);
+    void restoreDirectNvencResource(ID3D12Resource* resource, D3D12_RESOURCE_STATES originalState);
     ID3D12Resource* convertToInternalFormat(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState);
 
     DebugLog log_;
@@ -39,10 +48,16 @@ private:
     D3D12CoreLib::D3D12DescriptorAllocator samplerAllocator_;
     D3D12CoreLib::Processing::D3D12ProcessingContext processingContext_;
     D3D12CoreLib::Processing::D3D12FormatConverter formatConverter_;
+    D3D12CoreLib::Processing::D3D12Resizer resizer_;
+    D3D12CoreLib::Processing::D3D12FusedProcessor fusedProcessor_;
     D3D12CoreLib::D3D12CommandContext commandContext_;
+    D3D12CoreLib::D3D12CommandContext directStateCommandContext_;
+    D3D12CoreLib::D3D12Resource resizedTexture_;
+    D3D12_RESOURCE_STATES resizedTextureState_ = D3D12_RESOURCE_STATE_COMMON;
     D3D12CoreLib::D3D12Resource convertedTexture_;
     D3D12_RESOURCE_STATES convertedTextureState_ = D3D12_RESOURCE_STATE_COMMON;
     UINT64 processingFenceValue_ = 0;
+    UINT64 directStateFenceValue_ = 0;
 };
 
 } // namespace D3DVideoEncoderLib

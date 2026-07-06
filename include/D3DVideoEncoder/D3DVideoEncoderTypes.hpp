@@ -58,6 +58,21 @@ enum class EncoderQueueFullPolicy {
     DropOldest,
 };
 
+struct VideoProcessingRect {
+    int32_t x = 0;
+    int32_t y = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+
+    // width == 0 or height == 0 means "use the full source extent".
+    bool isEmpty() const noexcept { return width == 0 || height == 0; }
+};
+
+enum class VideoProcessingFilter {
+    Point,
+    Linear,
+};
+
 
 struct NvencFormatCapability {
     VideoCodec codec = VideoCodec::H264;
@@ -167,6 +182,14 @@ inline const char* ToString(VideoPixelFormat format) noexcept {
     case VideoPixelFormat::BGRA8: return "BGRA8";
     case VideoPixelFormat::RGBA8: return "RGBA8";
     case VideoPixelFormat::RGBA16F: return "RGBA16F";
+    default: return "Unknown";
+    }
+}
+
+inline const char* ToString(VideoProcessingFilter filter) noexcept {
+    switch (filter) {
+    case VideoProcessingFilter::Point: return "Point";
+    case VideoProcessingFilter::Linear: return "Linear";
     default: return "Unknown";
     }
 }

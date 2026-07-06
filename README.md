@@ -23,11 +23,11 @@
 | Media Foundation backend | D3D11専用で対応 |
 | H.264 MP4 | 対応 |
 | HEVC MP4 | 環境依存で対応。`QueryMediaFoundationCapabilities()` で事前確認 |
-| async write | 対応。実動画テスト追加済み |
+| async write | D3D11/D3D12ともに対応。D3D11実動画テスト、D3D12 queueテスト、NVENC D3D12 async smokeで確認 |
 | D3D12入力API | D3D11版から分離済み |
 | D3D12 + Media Foundation | 未対応。将来実装 |
-| NVENC D3D11 | `D3DVIDEOENCODER_ENABLE_NVENC=ON` 時に対応。`.h264` / `.h265` elementary stream と `.mp4` / `.mkv` mux出力に対応 |
-| NVENC D3D12 | `D3DVIDEOENCODER_ENABLE_NVENC=ON` 時に対応。NV12/P010直接入力、またはD3D12ProcessingによるRGB→NV12/P010変換。`.h264` / `.h265` / `.mp4` / `.mkv` 出力に対応 |
+| NVENC D3D11 | `D3DVIDEOENCODER_ENABLE_NVENC=ON` 時に対応。`.h264` / `.h265` elementary stream と `.mp4` / `.mkv` mux出力に対応。resource/register pool化済み |
+| NVENC D3D12 | `D3DVIDEOENCODER_ENABLE_NVENC=ON` 時に対応。NV12/P010直接入力、またはD3D12ProcessingによるRGB→NV12/P010変換。`.h264` / `.h265` / `.mp4` / `.mkv` 出力に対応。async write と resource/register pool化済み |
 | native D3D12 Video Encode | `D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE=ON` 時にbackend scaffoldをビルド。実フレームエンコード/bitstream出力は未完了 |
 | AV1 | NVENC SDK/GPU依存。初期実装ではH.264/HEVCを主対象 |
 
@@ -286,11 +286,39 @@ encoder.close();
 
 ```text
 - 出力は .h264 / .h265 の elementary stream、または .mp4 / .mkv mux
+- asyncMode=true の場合、D3D12 resourceは内部queueが ComPtr で保持し、worker threadでencodeする
 - D3D12Processingを使う場合、内部でDirectQueueへ変換コマンドを投入し、NVENC投入前にfence待ちする
 - 入力がNV12/P010直接入力の場合、resource state は D3D12_RESOURCE_STATE_COMMON を要求
 - 入力がRGB系の場合、write()へ渡された currentState から変換し、変換後scratchをCOMMONでNVENCへ渡す
-- MP4/MKV muxは未実装
+- NVENC resource registration はセッション内でpool化し、同じresourceを毎フレームregister/unregisterしない
 ```
+
+---
+
+## NvencD3D12 crop / resize / state management
+
+D3D12入力サイズとエンコード出力サイズを分けられます。未指定時は従来通り `desc.width x desc.height` の全体入力として扱います。
+
+```cpp
+D3D12VideoEncoderDesc desc;
+desc.width = 1280;
+desc.height = 720;
+desc.input.sourceWidth = 1920;
+desc.input.sourceHeight = 1080;
+desc.input.sourceRect = { 320, 180, 1280, 720 };
+desc.input.resizeFilter = VideoProcessingFilter::Linear;
+desc.input.preferFusedResize = true;
+```
+
+この場合は `1920x1080` の入力テクスチャから `(320,180)-(1600,900)` を切り出し、必要に応じて `1280x720` へresizeしてから `NV12/P010` へ変換します。
+
+直接 `NV12/P010` を渡す場合も、呼び出し側が必ず `COMMON` に遷移しておく必要はなくなりました。`write(resource, currentState)` に現在stateを渡すと、encoder側で `COMMON` へ遷移し、既定ではencode後に元stateへ戻します。復帰が不要な場合は以下を指定できます。
+
+```cpp
+desc.input.restoreStateAfterEncode = false;
+```
+
+制約として、現時点のcrop/resizeはRGB系入力向けです。直接 `NV12/P010` 入力に対するcrop/resizeは未対応です。
 
 ---
 
@@ -338,6 +366,7 @@ Types
 DescValidation
 HResult
 EncodeJobQueue
+D3D12EncodeJobQueue
 D3D12UnsupportedBackend
 D3D11EncodeSmoke
 D3D11EncodeAsyncSmoke
@@ -346,7 +375,7 @@ D3D11MediaFoundationCapabilities
 
 `D3D11EncodeSmoke` は、D3D11Helperで作成した `BGRA8` textureを `D3D11VideoEncoder` に渡し、Media Foundation backendで H.264 MP4 を生成します。その後、生成されたMP4を Media Foundation Source Reader で読み返し、動画streamの幅・高さ・sample数を検証します。
 
-`D3D11EncodeAsyncSmoke` は同じ実動画出力を `asyncMode=true` / `queueDepth=2` で実行し、worker thread 経由の書き込みと `close()` 時のflushを検証します。
+`D3D11EncodeAsyncSmoke` は同じ実動画出力を `asyncMode=true` / `queueDepth=2` で実行し、worker thread 経由の書き込みと `close()` 時のflushを検証します。`D3D12EncodeJobQueue` はD3D12 async queueのDropOldest/DropNewestとdrain動作を検証します。
 
 `D3D11MediaFoundationCapabilities` は、H.264/NV12、HEVC/NV12、HEVC/P010、AV1/NV12、AV1/P010 のMedia Foundation encoder MFTを列挙します。H.264/NV12は必須として検証し、HEVC/P010は環境依存のため対応可否を表示します。
 
@@ -359,6 +388,8 @@ NvencCapabilities
 NvencD3D11H264Mp4Smoke
 NvencD3D12RgbaH264Mp4Smoke
 ```
+
+`NvencD3D12RgbaH264Mp4Smoke` は `asyncMode=true` で実行し、D3D12ProcessingによるRGBA→NV12変換、D3D12 worker queue、NVENC resource/register pool、MP4 muxを同時に通します。
 
 また、通常テストに `D3D11HevcP010Smoke` を追加しています。これはMedia Foundation capability queryでHEVC/P010 encoderが見つかる環境だけ実エンコードを行い、未対応環境ではskipします。
 
@@ -419,18 +450,15 @@ git push
 
 優先順位は以下です。
 
-1. D3D11 surface pool / async queue の細部強化
-2. HEVC/P010 実エンコードテストの条件付き追加
-3. NVENC D3D11 backend
-4. NvencD3D12 backend
-5. D3D12Processing + NvencD3D12 接続
-6. native D3D12 Video Encode backend の実フレームエンコード/bitstream出力
-7. NVENC resource/register pool化
-8. D3D12 + Media Foundation backend の再検討
+1. native D3D12 Video Encode backend の実フレームエンコード/bitstream出力
+2. D3D12 + Media Foundation backend の再検討
+3. D3D12 direct NV12/P010 path のstate管理改善
+4. 可変duration API
+5. AV1 mux / AV1詳細tuning
 
 
 ## Recent stability improvements
 
 The D3D11 Media Foundation backend now reports failures with encoder context such as codec, input format, frame size, frame rate, bitrate, hardware-transform settings, and the Media Foundation call that failed.  It also checks Media Foundation encoder capabilities before constructing the sink writer so unsupported HEVC/P010 environments fail with a clear message.
 
-The D3D11 encode surface pool now tracks active surfaces with per-pool generations, waits for all outstanding surfaces during flush/close, releases surfaces if input preparation fails, and returns dropped `DropOldest` queue jobs to the encoder so their surfaces are released correctly.
+The D3D11 encode surface pool now tracks active surfaces with per-pool generations, waits for all outstanding surfaces during flush/close, releases surfaces if input preparation fails, and returns dropped `DropOldest` queue jobs to the encoder so their surfaces are released correctly. D3D12VideoEncoder now supports async write with a ComPtr-backed D3D12 job queue, and NVENC DirectX resource registration is pooled for the lifetime of the encoder session.

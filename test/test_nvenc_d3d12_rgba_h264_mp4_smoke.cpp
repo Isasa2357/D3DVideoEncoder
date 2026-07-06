@@ -49,6 +49,8 @@ int main() {
             return 0;
         }
 
+        constexpr uint32_t sourceWidth = 640;
+        constexpr uint32_t sourceHeight = 360;
         constexpr uint32_t width = 320;
         constexpr uint32_t height = 180;
         constexpr uint32_t frames = 10;
@@ -68,14 +70,22 @@ int main() {
         desc.bitrate = 4'000'000;
         desc.input.core = core.get();
         desc.input.inputFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.input.sourceWidth = sourceWidth;
+        desc.input.sourceHeight = sourceHeight;
+        desc.input.sourceRect = { 64, 36, 512, 288 };
+        desc.input.resizeFilter = VideoProcessingFilter::Linear;
+        desc.input.preferFusedResize = true;
         desc.input.processingShaderDirectory = shaderDir;
+        desc.asyncMode = true;
+        desc.queueDepth = 2;
+        desc.queueFullPolicy = EncoderQueueFullPolicy::Block;
         desc.enableDebugLog = true;
 
         D3D12VideoEncoder encoder(desc);
-        std::vector<uint8_t> rgba(static_cast<size_t>(width) * height * 4);
+        std::vector<uint8_t> rgba(static_cast<size_t>(sourceWidth) * sourceHeight * 4);
         for (uint32_t f = 0; f < frames; ++f) {
-            fill_rgba_frame(rgba, width, height, f);
-            D3D12Resource src = CreateTexture2DFromRGBA(*core, rgba.data(), width, height, D3D12_RESOURCE_STATE_COMMON);
+            fill_rgba_frame(rgba, sourceWidth, sourceHeight, f);
+            D3D12Resource src = CreateTexture2DFromRGBA(*core, rgba.data(), sourceWidth, sourceHeight, D3D12_RESOURCE_STATE_COMMON);
             encoder.write(src.Get(), D3D12_RESOURCE_STATE_COMMON);
         }
         encoder.close();
@@ -84,7 +94,7 @@ int main() {
             std::cerr << "NVENC D3D12 MP4 output was not created or is too small.\n";
             return 1;
         }
-        std::cout << "NVENC D3D12 RGBA->H.264 MP4 smoke wrote " << outputPath.string() << "\n";
+        std::cout << "NVENC D3D12 async RGBA crop+resize->H.264 MP4 smoke wrote " << outputPath.string() << "\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "NVENC D3D12 RGBA H.264 MP4 smoke failed: " << e.what() << "\n";

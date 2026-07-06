@@ -40,6 +40,12 @@ int main() {
     require_true(std::string(ToString(VideoCodec::H264)) == "H264", "H264 ToString");
     require_true(std::string(ToString(VideoCodec::HEVC)) == "HEVC", "HEVC ToString");
     require_true(std::string(ToString(VideoPixelFormat::P010)) == "P010", "P010 ToString");
+    require_true(std::string(ToString(VideoProcessingFilter::Linear)) == "Linear", "Linear filter ToString");
+
+    VideoProcessingRect emptyRect;
+    require_true(emptyRect.isEmpty(), "default VideoProcessingRect means full source");
+    VideoProcessingRect cropRect{ 2, 4, 128, 64 };
+    require_true(!cropRect.isEmpty(), "non-empty VideoProcessingRect is treated as crop rect");
 
     return 0;
 }
