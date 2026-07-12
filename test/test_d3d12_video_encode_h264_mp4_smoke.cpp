@@ -61,6 +61,16 @@ D3D12_RESOURCE_DESC nv12_texture_desc(uint32_t width, uint32_t height) noexcept 
     return desc;
 }
 
+D3D12_RESOURCE_BARRIER transition_barrier(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) noexcept {
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = resource;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = before;
+    barrier.Transition.StateAfter = after;
+    return barrier;
+}
+
 void wait_for_queue(ID3D12Device* device, ID3D12CommandQueue* queue) {
     ComPtr<ID3D12Fence> fence;
     throw_if_failed(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "CreateFence");
@@ -119,6 +129,8 @@ void upload_black_nv12(D3D12CoreLib::D3D12Core& core, ID3D12Resource* texture, u
     src.PlacedFootprint = footprint;
 
     commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    auto handoffBarrier = transition_barrier(texture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+    commandList->ResourceBarrier(1, &handoffBarrier);
     throw_if_failed(commandList->Close(), "Close upload command list");
     ID3D12CommandList* lists[] = { commandList.Get() };
     core.GetDirectCommandQueue()->ExecuteCommandLists(1, lists);
@@ -184,7 +196,7 @@ int main() {
 
         D3D12VideoEncoder encoder(desc);
         for (int i = 0; i < 30; ++i) {
-            encoder.write(texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST);
+            encoder.write(texture.Get(), D3D12_RESOURCE_STATE_COMMON);
         }
         encoder.close();
 

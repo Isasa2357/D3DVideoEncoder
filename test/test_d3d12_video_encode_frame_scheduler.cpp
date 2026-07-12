@@ -106,6 +106,88 @@ void test_closed_gop_does_not_cross_next_idr() {
     }
 }
 
+struct H264PictureControlExpectation {
+    bool idr = false;
+    uint32_t frameDecodingOrderNumber = 0;
+    uint32_t pictureOrderCountNumber = 0;
+    uint32_t idrPicId = 0;
+    int32_t referenceFrameDecodingOrderNumber = -1;
+    int32_t referencePictureOrderCountNumber = -1;
+};
+
+std::vector<H264PictureControlExpectation> make_h264_expectations(uint32_t frameCount, uint32_t gopLength, uint32_t firstIdrPicId = 0) {
+    std::vector<H264PictureControlExpectation> out;
+    out.reserve(frameCount);
+    uint32_t nextIdrPicId = firstIdrPicId;
+    uint32_t gopStart = 0;
+    uint32_t previousReferenceFrameNum = 0;
+    uint32_t previousReferencePoc = 0;
+    bool hasReference = false;
+
+    for (uint32_t frame = 0; frame < frameCount; ++frame) {
+        const bool idr = (frame % gopLength) == 0 || !hasReference;
+        if (idr) {
+            gopStart = frame;
+        }
+        const uint32_t gopLocal = frame - gopStart;
+
+        H264PictureControlExpectation e;
+        e.idr = idr;
+        e.frameDecodingOrderNumber = idr ? 0u : gopLocal;
+        e.pictureOrderCountNumber = idr ? 0u : gopLocal;
+        e.idrPicId = nextIdrPicId;
+        if (!idr && hasReference) {
+            e.referenceFrameDecodingOrderNumber = static_cast<int32_t>(previousReferenceFrameNum);
+            e.referencePictureOrderCountNumber = static_cast<int32_t>(previousReferencePoc);
+        }
+        out.push_back(e);
+
+        previousReferenceFrameNum = e.frameDecodingOrderNumber;
+        previousReferencePoc = e.pictureOrderCountNumber;
+        hasReference = true;
+        if (idr) {
+            nextIdrPicId = nextIdrPicId >= 65535u ? 0u : nextIdrPicId + 1u;
+        }
+    }
+    return out;
+}
+
+void test_h264_gop_local_picture_control_values() {
+    const auto p = make_h264_expectations(34, 15);
+    require(p.size() == 34, "H.264 expectation sequence length mismatch");
+
+    require(p[0].idr, "frame 0 must be IDR");
+    require(p[0].frameDecodingOrderNumber == 0, "IDR frame_num must be 0");
+    require(p[0].pictureOrderCountNumber == 0, "IDR POC must be 0");
+    require(p[0].idrPicId == 0, "first idr_pic_id must start at 0");
+    require(p[0].referenceFrameDecodingOrderNumber < 0, "IDR must not have a previous reference descriptor");
+
+    require(!p[1].idr, "frame 1 must be P");
+    require(p[1].frameDecodingOrderNumber == 1, "P frame_num must be GOP-local");
+    require(p[1].pictureOrderCountNumber == 1, "P POC must be GOP-local");
+    require(p[1].referenceFrameDecodingOrderNumber == 0, "first P reference frame_num must point to GOP-local IDR 0");
+    require(p[1].referencePictureOrderCountNumber == 0, "first P reference POC must point to GOP-local IDR 0");
+
+    require(!p[14].idr, "last frame before GOP boundary must be P");
+    require(p[14].frameDecodingOrderNumber == 14, "P frame before IDR must remain GOP-local");
+    require(p[14].referenceFrameDecodingOrderNumber == 13, "P reference descriptor must use previous GOP-local frame_num");
+
+    require(p[15].idr, "frame 15 must be repeated IDR");
+    require(p[15].frameDecodingOrderNumber == 0, "repeated IDR frame_num must reset");
+    require(p[15].pictureOrderCountNumber == 0, "repeated IDR POC must reset");
+    require(p[15].idrPicId == 1, "repeated IDR idr_pic_id must increment");
+    require(p[15].referenceFrameDecodingOrderNumber < 0, "repeated IDR must not reference previous GOP");
+
+    require(!p[16].idr, "frame 16 must be P after repeated IDR");
+    require(p[16].frameDecodingOrderNumber == 1, "P after repeated IDR must restart at GOP-local 1");
+    require(p[16].pictureOrderCountNumber == 1, "P POC after repeated IDR must restart at GOP-local 1");
+    require(p[16].referenceFrameDecodingOrderNumber == 0, "P after repeated IDR must reference GOP-local IDR 0");
+
+    const auto wrapped = make_h264_expectations(16, 15, 65535);
+    require(wrapped[0].idrPicId == 65535, "idr_pic_id should allow 65535");
+    require(wrapped[15].idrPicId == 0, "idr_pic_id must wrap to 0 after 65535");
+}
+
 void test_validation() {
     bool threw = false;
     try {
@@ -132,6 +214,7 @@ int main() {
     test_p_only_schedule();
     test_b_frame_schedule_order();
     test_closed_gop_does_not_cross_next_idr();
+    test_h264_gop_local_picture_control_values();
     test_validation();
     std::cout << "D3D12 Video Encode frame scheduler tests passed.\n";
     return 0;

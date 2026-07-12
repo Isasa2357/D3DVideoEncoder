@@ -5,8 +5,11 @@
 #include "backend/d3d12video/ID3D12VideoEncodeBackend.hpp"
 #include "util/DebugLog.hpp"
 
+#include <D3D12Helper/D3D12Core/D3D12BarrierBatch.hpp>
 #include <D3D12Helper/D3D12Core/D3D12CommandContext.hpp>
+#include <D3D12Helper/D3D12Core/D3D12Queue.hpp>
 #include <D3D12Helper/D3D12Framework/D3D12DescriptorAllocator.hpp>
+#include <D3D12Helper/D3D12Framework/D3D12ReadbackBuffer.hpp>
 #include <D3D12Helper/D3D12Framework/D3D12Resource.hpp>
 #include <D3D12Helper/D3D12Processing/D3D12Processing.hpp>
 
@@ -48,7 +51,7 @@ private:
     void createQueuesAndCommands();
     void createBuffers();
     void createReconstructedPictures();
-    void createFences();
+    void waitForProcessingCompletion();
     void destroyObjects() noexcept;
 
     bool inputAlreadyMatchesInternalFormat() const noexcept;
@@ -67,8 +70,10 @@ private:
     void waitForCopyQueue();
     void writeResolvedBitstream(int64_t timestamp100ns, int64_t duration100ns);
 
-    void transitionVideo(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
-    void transitionCopy(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
+    void transitionVideo(const char* logicalName, ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
+    bool transitionCopy(const char* logicalName, ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
+    void recordVideoBarrierPhase();
+    void recordCopyBarrierPhase();
     void signalVideoAndWaitOnCopy();
 
     DebugLog log_;
@@ -80,24 +85,21 @@ private:
     Microsoft::WRL::ComPtr<ID3D12VideoEncoder> encoder_;
     Microsoft::WRL::ComPtr<ID3D12VideoEncoderHeap> encoderHeap_;
 
-    Microsoft::WRL::ComPtr<ID3D12CommandQueue> videoQueue_;
-    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> videoAllocator_;
+    D3D12CoreLib::D3D12Queue videoQueue_;
+    D3D12CoreLib::D3D12CommandAllocatorContext videoAllocator_;
     Microsoft::WRL::ComPtr<ID3D12VideoEncodeCommandList2> videoCommandList_;
 
-    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> copyAllocator_;
+    D3D12CoreLib::D3D12CommandAllocatorContext copyAllocator_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> copyCommandList_;
+    D3D12CoreLib::D3D12BarrierBatch videoBarriers_;
+    D3D12CoreLib::D3D12BarrierBatch copyBarriers_;
 
-    Microsoft::WRL::ComPtr<ID3D12Fence> videoFence_;
-    Microsoft::WRL::ComPtr<ID3D12Fence> copyFence_;
-    uint64_t videoFenceValue_ = 0;
-    uint64_t copyFenceValue_ = 0;
-
-    Microsoft::WRL::ComPtr<ID3D12Resource> bitstreamBuffer_;
-    Microsoft::WRL::ComPtr<ID3D12Resource> bitstreamReadback_;
-    Microsoft::WRL::ComPtr<ID3D12Resource> encoderMetadataBuffer_;
-    Microsoft::WRL::ComPtr<ID3D12Resource> resolvedMetadataBuffer_;
-    Microsoft::WRL::ComPtr<ID3D12Resource> resolvedMetadataReadback_;
-    std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, 2> reconstructedPictures_;
+    D3D12CoreLib::D3D12Resource bitstreamBuffer_;
+    D3D12CoreLib::D3D12ReadbackBuffer bitstreamReadback_;
+    D3D12CoreLib::D3D12Resource encoderMetadataBuffer_;
+    D3D12CoreLib::D3D12Resource resolvedMetadataBuffer_;
+    D3D12CoreLib::D3D12ReadbackBuffer resolvedMetadataReadback_;
+    std::array<D3D12CoreLib::D3D12Resource, 2> reconstructedPictures_;
 
     D3D12_RESOURCE_STATES bitstreamState_ = D3D12_RESOURCE_STATE_COMMON;
     D3D12_RESOURCE_STATES encoderMetadataState_ = D3D12_RESOURCE_STATE_COMMON;
@@ -117,6 +119,10 @@ private:
     uint32_t currentReconIndex_ = 0;
     uint32_t previousReconIndex_ = 0;
     bool hasReferenceFrame_ = false;
+    uint64_t h264CurrentGopStartFrame_ = 0;
+    uint32_t h264NextIdrPicId_ = 0;
+    uint32_t h264PreviousReferenceDecodingOrder_ = 0;
+    uint32_t h264PreviousReferencePoc_ = 0;
 
     D3D12VideoEncodeBitstreamWriter writer_;
 

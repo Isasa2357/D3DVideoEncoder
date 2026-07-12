@@ -35,7 +35,11 @@ void NvencD3D11EncoderBackend::initialize(const D3D11VideoEncoderDesc& desc) {
     sessionDesc.rateControl = desc_.rateControl;
 
     log_.info("NvencD3D11EncoderBackend initialize");
-    session_.initialize(desc_.input.core->GetDevice(), NV_ENC_DEVICE_TYPE_DIRECTX, sessionDesc);
+    session_.initialize(
+        desc_.input.core->GetDevice(),
+        NV_ENC_DEVICE_TYPE_DIRECTX,
+        NvencDirectXDeviceKind::D3D11,
+        sessionDesc);
     open_ = true;
 }
 

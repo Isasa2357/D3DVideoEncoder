@@ -4,6 +4,10 @@
 
 #include <D3DVideoEncoder/D3DVideoEncoderError.hpp>
 
+#include <D3D11Helper/D3D11Gpu/D3D11Copy.hpp>
+#include <D3D11Helper/D3D11Gpu/D3D11ResourceValidation.hpp>
+#include <D3D11Helper/D3D11Gpu/D3D11ResourceView.hpp>
+
 namespace D3DVideoEncoderLib {
 
 void D3D11VideoInputAdapter::initialize(const D3D11VideoEncoderDesc& desc, DebugLog log) {
@@ -60,25 +64,19 @@ void D3D11VideoInputAdapter::validateTexture(ID3D11Texture2D* texture, D3D11_TEX
 
     texture->GetDesc(&outDesc);
 
-    if (outDesc.Width != desc_.width || outDesc.Height != desc_.height) {
-        std::ostringstream oss;
-        oss << "Input texture size mismatch. expected=" << desc_.width << "x" << desc_.height
-            << " actual=" << outDesc.Width << "x" << outDesc.Height;
-        throw D3DVideoEncoderError(oss.str());
-    }
+    D3D11CoreLib::D3D11Texture2DRequirement requirement = {};
+    requirement.device = core_->GetDevice();
+    requirement.width = desc_.width;
+    requirement.height = desc_.height;
+    requirement.format = desc_.input.inputFormat;
 
-    if (outDesc.Format != desc_.input.inputFormat) {
+    const auto validation = D3D11CoreLib::ValidateTexture2DView(
+        D3D11CoreLib::D3D11ResourceView(texture),
+        requirement);
+    if (!validation) {
         std::ostringstream oss;
-        oss << "Input texture format mismatch. expected DXGI_FORMAT value="
-            << static_cast<int>(desc_.input.inputFormat)
-            << " actual=" << static_cast<int>(outDesc.Format);
+        oss << "Input texture validation failed: " << validation.Message();
         throw D3DVideoEncoderError(oss.str());
-    }
-
-    Microsoft::WRL::ComPtr<ID3D11Device> texDevice;
-    texture->GetDevice(&texDevice);
-    if (texDevice.Get() != core_->GetDevice()) {
-        throw D3DVideoEncoderError("Input texture belongs to a different ID3D11Device than desc.d3d11.core.");
     }
 }
 
@@ -102,7 +100,7 @@ EncodeSurface D3D11VideoInputAdapter::prepare(ID3D11Texture2D* texture) {
     ID3D11DeviceContext* context = core_->GetImmediateContext();
 
     if (texDesc.Format == ToDxgiFormat(desc_.internalFormat)) {
-        context->CopyResource(dst.d3d11Texture.Get(), texture);
+        D3D11CoreLib::CopyTexture2D(context, dst.d3d11Texture.Get(), texture);
         core_->Flush();
         guard.dismiss();
         return dst;
@@ -110,8 +108,8 @@ EncodeSurface D3D11VideoInputAdapter::prepare(ID3D11Texture2D* texture) {
 
     initializeConverterIfNeeded(texDesc.Format);
 
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> srcTexture(texture);
-    D3D11CoreLib::D3D11Resource srcResource(srcTexture);
+    D3D11CoreLib::D3D11ResourceView srcView(texture);
+    D3D11CoreLib::D3D11ResourceView dstView(dst.d3d11Resource);
 
     D3D11CoreLib::Processing::FormatConvertDesc convertDesc = {};
     convertDesc.srcFormat = texDesc.Format;
@@ -124,10 +122,10 @@ EncodeSurface D3D11VideoInputAdapter::prepare(ID3D11Texture2D* texture) {
     convertDesc.srcRect = { 0, 0, desc_.width, desc_.height };
     convertDesc.dstRect = { 0, 0, desc_.width, desc_.height };
 
-    formatConverter_.DispatchConvert(
+    formatConverter_.DispatchConvertView(
         context,
-        srcResource,
-        dst.d3d11Resource,
+        srcView,
+        dstView,
         convertDesc);
 
     // Input preparation is synchronous. Flush keeps Media Foundation from seeing a surface

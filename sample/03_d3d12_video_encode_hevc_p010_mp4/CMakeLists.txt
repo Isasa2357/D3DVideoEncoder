@@ -10,5 +10,3 @@ target_link_libraries(D3DVideoEncoder_03_d3d12_video_encode_hevc_p010_mp4
 if(MSVC)
     target_compile_options(D3DVideoEncoder_03_d3d12_video_encode_hevc_p010_mp4 PRIVATE /utf-8 /EHsc)
 endif()
-
-d3dvideoencoder_copy_dxc_runtime(D3DVideoEncoder_03_d3d12_video_encode_hevc_p010_mp4)

@@ -93,14 +93,32 @@ target_include_directories(D3DVideoEncoder_test_d3d11_hevc_p010_smoke PRIVATE
 if(D3DVIDEOENCODER_HAS_NVENC)
     list(APPEND D3DVIDEOENCODER_TEST_TARGETS
         D3DVideoEncoder_test_nvenc_capabilities
+        D3DVideoEncoder_test_nvenc_d3d11_direct_nv12_acceptance
         D3DVideoEncoder_test_nvenc_d3d11_h264_mp4_smoke
         D3DVideoEncoder_test_nvenc_d3d12_rgba_h264_mp4_smoke
+        D3DVideoEncoder_test_nvenc_d3d12_acceptance
+        D3DVideoEncoder_test_nvenc_lifecycle
+        D3DVideoEncoder_test_nvenc_d3d12_output_strategy
+        D3DVideoEncoder_test_nvenc_mp4_duration
     )
 
     add_executable(D3DVideoEncoder_test_nvenc_capabilities
         test_nvenc_capabilities.cpp
     )
     target_link_libraries(D3DVideoEncoder_test_nvenc_capabilities PRIVATE D3DVideoEncoder::D3DVideoEncoder)
+    target_include_directories(D3DVideoEncoder_test_nvenc_capabilities PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+        "${D3DVIDEOENCODER_NVENC_RESOLVED_INCLUDE_DIR}"
+    )
+
+    add_executable(D3DVideoEncoder_test_nvenc_d3d11_direct_nv12_acceptance
+        test_nvenc_d3d11_direct_nv12_acceptance.cpp
+    )
+    target_link_libraries(D3DVideoEncoder_test_nvenc_d3d11_direct_nv12_acceptance PRIVATE D3DVideoEncoder::D3DVideoEncoder)
+    target_include_directories(D3DVideoEncoder_test_nvenc_d3d11_direct_nv12_acceptance PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_BINARY_DIR}"
+    )
 
     add_executable(D3DVideoEncoder_test_nvenc_d3d11_h264_mp4_smoke
         test_nvenc_d3d11_h264_mp4_smoke.cpp
@@ -119,12 +137,49 @@ if(D3DVIDEOENCODER_HAS_NVENC)
         "${PROJECT_SOURCE_DIR}/src"
         "${CMAKE_CURRENT_BINARY_DIR}"
     )
+
+    add_executable(D3DVideoEncoder_test_nvenc_d3d12_acceptance test_nvenc_d3d12_acceptance.cpp)
+    target_link_libraries(D3DVideoEncoder_test_nvenc_d3d12_acceptance PRIVATE D3DVideoEncoder::D3DVideoEncoder)
+    target_include_directories(D3DVideoEncoder_test_nvenc_d3d12_acceptance PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_BINARY_DIR}"
+    )
+
+    add_executable(D3DVideoEncoder_test_nvenc_lifecycle test_nvenc_lifecycle.cpp)
+    target_link_libraries(D3DVideoEncoder_test_nvenc_lifecycle PRIVATE D3DVideoEncoder::D3DVideoEncoder)
+    target_include_directories(D3DVideoEncoder_test_nvenc_lifecycle PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+        "${D3DVIDEOENCODER_NVENC_RESOLVED_INCLUDE_DIR}"
+    )
+
+    add_executable(D3DVideoEncoder_test_nvenc_d3d12_output_strategy test_nvenc_d3d12_output_strategy.cpp)
+    target_link_libraries(D3DVideoEncoder_test_nvenc_d3d12_output_strategy PRIVATE D3DVideoEncoder::D3DVideoEncoder)
+    target_include_directories(D3DVideoEncoder_test_nvenc_d3d12_output_strategy PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+        "${D3DVIDEOENCODER_NVENC_RESOLVED_INCLUDE_DIR}"
+    )
+
+    add_executable(D3DVideoEncoder_test_nvenc_mp4_duration test_nvenc_mp4_duration.cpp)
+    target_link_libraries(D3DVideoEncoder_test_nvenc_mp4_duration PRIVATE D3DVideoEncoder::D3DVideoEncoder)
+    target_include_directories(D3DVideoEncoder_test_nvenc_mp4_duration PRIVATE "${PROJECT_SOURCE_DIR}/src")
 endif()
 
 if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
     list(APPEND D3DVIDEOENCODER_TEST_TARGETS
         D3DVideoEncoder_test_d3d12_video_encode_capabilities
+        D3DVideoEncoder_test_d3d12_video_encode_h264_parameter_sets
     )
+
+    add_executable(D3DVideoEncoder_test_d3d12_video_encode_h264_parameter_sets
+        test_d3d12_video_encode_h264_parameter_sets.cpp
+    )
+    target_link_libraries(D3DVideoEncoder_test_d3d12_video_encode_h264_parameter_sets PRIVATE D3DVideoEncoder::D3DVideoEncoder)
+    target_include_directories(D3DVideoEncoder_test_d3d12_video_encode_h264_parameter_sets PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+    )
+    if(MSVC)
+        target_compile_options(D3DVideoEncoder_test_d3d12_video_encode_h264_parameter_sets PRIVATE /utf-8 /EHsc)
+    endif()
 
     add_executable(D3DVideoEncoder_test_d3d12_video_encode_capabilities
         test_d3d12_video_encode_capabilities.cpp
@@ -134,6 +189,58 @@ if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
         "${PROJECT_SOURCE_DIR}/src"
         "${CMAKE_CURRENT_BINARY_DIR}"
     )
+    if(CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
+        target_compile_definitions(D3DVideoEncoder_test_d3d12_video_encode_capabilities
+            PRIVATE D3DVE_DIAGNOSTIC_WINDOWS_SDK_VERSION=\"${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}\"
+        )
+    endif()
+
+    add_executable(D3DVideoEncoder_test_d3d12_video_encode_minimal_probe
+        test_d3d12_video_encode_minimal_probe.cpp
+    )
+    target_link_libraries(D3DVideoEncoder_test_d3d12_video_encode_minimal_probe
+        PRIVATE
+            D3DVideoEncoder::D3DVideoEncoder
+            d3d12
+            dxgi
+            dxguid
+    )
+    target_include_directories(D3DVideoEncoder_test_d3d12_video_encode_minimal_probe PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_BINARY_DIR}"
+    )
+    target_compile_definitions(D3DVideoEncoder_test_d3d12_video_encode_minimal_probe
+        PRIVATE D3DVIDEOENCODER_TEST_HAS_D3D12_VIDEO_ENCODE=1
+    )
+    if(CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
+        target_compile_definitions(D3DVideoEncoder_test_d3d12_video_encode_minimal_probe
+            PRIVATE D3DVE_DIAGNOSTIC_WINDOWS_SDK_VERSION=\"${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}\"
+        )
+    endif()
+    if(MSVC)
+        target_compile_options(D3DVideoEncoder_test_d3d12_video_encode_minimal_probe PRIVATE /utf-8 /EHsc)
+    endif()
+
+    add_executable(D3DVideoEncoder_test_d3d12_video_encode_acceptance
+        test_d3d12_video_encode_acceptance.cpp
+    )
+    target_link_libraries(D3DVideoEncoder_test_d3d12_video_encode_acceptance
+        PRIVATE
+            D3DVideoEncoder::D3DVideoEncoder
+            d3d12
+            dxgi
+            dxguid
+    )
+    target_include_directories(D3DVideoEncoder_test_d3d12_video_encode_acceptance PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_BINARY_DIR}"
+    )
+    target_compile_definitions(D3DVideoEncoder_test_d3d12_video_encode_acceptance
+        PRIVATE D3DVIDEOENCODER_TEST_HAS_D3D12_VIDEO_ENCODE=1
+    )
+    if(MSVC)
+        target_compile_options(D3DVideoEncoder_test_d3d12_video_encode_acceptance PRIVATE /utf-8 /EHsc)
+    endif()
 endif()
 
 if(D3DVIDEOENCODER_HAS_NVENC)
@@ -226,8 +333,32 @@ if(MSVC)
     endforeach()
 endif()
 
-foreach(tgt IN LISTS D3DVIDEOENCODER_TEST_TARGETS)
-    d3dvideoencoder_copy_dxc_runtime(${tgt})
+set(D3DVIDEOENCODER_DXC_RUNTIME_TEST_TARGETS
+    D3DVideoEncoder_test_d3d11_encode_smoke
+    D3DVideoEncoder_test_d3d11_encode_async_smoke
+    D3DVideoEncoder_test_d3d11_hevc_p010_smoke
+)
+
+if(D3DVIDEOENCODER_HAS_NVENC)
+    list(APPEND D3DVIDEOENCODER_DXC_RUNTIME_TEST_TARGETS
+        D3DVideoEncoder_test_nvenc_d3d11_h264_mp4_smoke
+        D3DVideoEncoder_test_nvenc_d3d12_rgba_h264_mp4_smoke
+        D3DVideoEncoder_test_nvenc_d3d12_acceptance
+    )
+endif()
+
+if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
+    list(APPEND D3DVIDEOENCODER_DXC_RUNTIME_TEST_TARGETS
+        D3DVideoEncoder_test_d3d12_video_encode_rgba_h264_mp4_smoke
+        D3DVideoEncoder_test_d3d12_video_encode_nv12_crop_resize_smoke
+        D3DVideoEncoder_test_d3d12_video_encode_acceptance
+    )
+endif()
+
+foreach(tgt IN LISTS D3DVIDEOENCODER_DXC_RUNTIME_TEST_TARGETS)
+    if(TARGET ${tgt})
+        d3dvideoencoder_copy_dxc_runtime(${tgt})
+    endif()
 endforeach()
 
 add_test(NAME TimestampGenerator COMMAND D3DVideoEncoder_test_timestamp_generator)
@@ -246,12 +377,17 @@ if(D3DVIDEOENCODER_HAS_NVENC)
     add_test(NAME NvencCapabilities COMMAND D3DVideoEncoder_test_nvenc_capabilities)
     add_test(NAME NvencD3D11H264Mp4Smoke COMMAND D3DVideoEncoder_test_nvenc_d3d11_h264_mp4_smoke)
     add_test(NAME NvencD3D12RgbaH264Mp4Smoke COMMAND D3DVideoEncoder_test_nvenc_d3d12_rgba_h264_mp4_smoke)
+    add_test(NAME NvencLifecycle COMMAND D3DVideoEncoder_test_nvenc_lifecycle)
+    add_test(NAME NvencD3D12OutputStrategy COMMAND D3DVideoEncoder_test_nvenc_d3d12_output_strategy)
+    add_test(NAME NvencMp4Duration COMMAND D3DVideoEncoder_test_nvenc_mp4_duration)
     set_tests_properties(NvencD3D11H264Mp4Smoke PROPERTIES WORKING_DIRECTORY "$<TARGET_FILE_DIR:D3DVideoEncoder_test_nvenc_d3d11_h264_mp4_smoke>")
     set_tests_properties(NvencD3D12RgbaH264Mp4Smoke PROPERTIES WORKING_DIRECTORY "$<TARGET_FILE_DIR:D3DVideoEncoder_test_nvenc_d3d12_rgba_h264_mp4_smoke>")
 endif()
 
 if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
+    add_test(NAME D3D12VideoEncodeH264ParameterSets COMMAND D3DVideoEncoder_test_d3d12_video_encode_h264_parameter_sets)
     add_test(NAME D3D12VideoEncodeCapabilities COMMAND D3DVideoEncoder_test_d3d12_video_encode_capabilities)
+    add_test(NAME D3D12VideoEncodeMinimalProbe COMMAND D3DVideoEncoder_test_d3d12_video_encode_minimal_probe)
     add_test(NAME D3D12VideoEncodeH264Nv12Smoke COMMAND D3DVideoEncoder_test_d3d12_video_encode_h264_nv12_smoke)
     add_test(NAME D3D12VideoEncodeRgbaH264Mp4Smoke COMMAND D3DVideoEncoder_test_d3d12_video_encode_rgba_h264_mp4_smoke)
     add_test(NAME D3D12VideoEncodeH264Nv12AsyncSmoke COMMAND D3DVideoEncoder_test_d3d12_video_encode_h264_nv12_async_smoke)

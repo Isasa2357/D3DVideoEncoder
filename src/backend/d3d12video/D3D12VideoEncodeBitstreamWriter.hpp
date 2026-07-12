@@ -1,5 +1,7 @@
 #pragma once
 
+#include "backend/d3d12video/D3D12VideoEncodeH264ParameterSets.hpp"
+
 #include <D3DVideoEncoder/D3DVideoEncoderTypes.hpp>
 
 #include <cstdint>
@@ -30,10 +32,12 @@ public:
     void writeAccessUnit(const uint8_t* data, size_t size, int64_t timestamp100ns, int64_t duration100ns);
     void flush();
     void close();
+    void configureH264ParameterSets(const H264ParameterSetConfig& config);
 
     bool isOpen() const noexcept { return opened_; }
     bool isContainerMux() const noexcept;
     uint64_t bytesWritten() const noexcept { return bytesWritten_; }
+    size_t pendingBitstreamMetadataSize() const noexcept;
 
 private:
     enum class Container {
@@ -53,6 +57,7 @@ private:
     Container chooseContainer(const std::wstring& outputPath) const;
     void parseParameterSetsAndSample(Sample& sample);
     void writeElementary(const uint8_t* data, size_t size);
+    void writeElementaryH264(const uint8_t* data, size_t size);
     void writeMp4();
     void writeMkv();
 
@@ -70,6 +75,11 @@ private:
     std::vector<Sample> samples_;
     std::vector<uint8_t> avcSps_;
     std::vector<uint8_t> avcPps_;
+    std::vector<uint8_t> generatedAvcSpsAnnexB_;
+    std::vector<uint8_t> generatedAvcPpsAnnexB_;
+    std::vector<uint8_t> generatedAvcSps_;
+    std::vector<uint8_t> generatedAvcPps_;
+    bool h264ParameterSetsEmitted_ = false;
     std::vector<uint8_t> hevcVps_;
     std::vector<uint8_t> hevcSps_;
     std::vector<uint8_t> hevcPps_;

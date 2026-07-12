@@ -10,8 +10,10 @@
 #include <D3DVideoEncoder/D3DVideoEncoderError.hpp>
 
 #include <cstddef>
+#include <d3d11_4.h>
 #include <sstream>
 #include <utility>
+#include <wrl/client.h>
 
 namespace D3DVideoEncoderLib {
 
@@ -26,6 +28,7 @@ D3D11VideoEncoder::Impl::Impl(const D3D11VideoEncoderDesc& desc)
     log_.info(std::string("codec = ") + ToString(desc_.codec));
     log_.info(std::string("internalFormat = ") + ToString(desc_.internalFormat));
 
+    enableMultithreadProtectionIfNeeded();
     input_.initialize(desc_, log_);
 
     backend_ = createBackend();
@@ -98,6 +101,21 @@ std::unique_ptr<IVideoEncoderBackend> D3D11VideoEncoder::Impl::createBackend() {
 #endif
     default:
         throw D3DVideoEncoderError("Unsupported D3D11 encoder backend.");
+    }
+}
+
+void D3D11VideoEncoder::Impl::enableMultithreadProtectionIfNeeded() {
+    if (!desc_.asyncMode || !desc_.input.core || !desc_.input.core->GetImmediateContext()) {
+        return;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D11Multithread> multithread;
+    const HRESULT hr = desc_.input.core->GetImmediateContext()->QueryInterface(IID_PPV_ARGS(&multithread));
+    if (SUCCEEDED(hr) && multithread) {
+        multithread->SetMultithreadProtected(TRUE);
+        log_.info("D3D11VideoEncoder enabled ID3D11Multithread protection for async mode");
+    } else {
+        log_.info("D3D11VideoEncoder could not enable ID3D11Multithread protection for async mode");
     }
 }
 

@@ -1,6 +1,8 @@
 #include <D3DVideoEncoder/D3D12VideoEncoder.hpp>
 #include <D3D12Helper/D3D12Core/D3D12Core.hpp>
 
+#include "backend/d3d12video/D3D12VideoEncodeDiagnostic.hpp"
+
 #include <cstdint>
 #include <cstdlib>
 #include <cwchar>
@@ -44,8 +46,8 @@ uint32_t parse_u32(const wchar_t* s, uint32_t fallback) {
 
 int wmain(int argc, wchar_t** argv) {
     try {
-        const uint32_t width = (argc >= 2) ? parse_u32(argv[1], 1920) : 1920;
-        const uint32_t height = (argc >= 3) ? parse_u32(argv[2], 1080) : 1080;
+        const uint32_t width = (argc >= 2) ? parse_u32(argv[1], 640) : 640;
+        const uint32_t height = (argc >= 3) ? parse_u32(argv[2], 360) : 360;
 
         D3D12CoreLib::D3D12CoreConfig cfg;
         cfg.enableDebugLayer = false;
@@ -53,6 +55,9 @@ int wmain(int argc, wchar_t** argv) {
         cfg.enableDred = false;
         cfg.allowWarpAdapter = false;
         auto core = D3D12CoreLib::D3D12Core::CreateShared(cfg);
+
+        Diagnostics::PrintNativeD3D12H264Nv12Diagnostic(*core, std::cout);
+        std::cout << "\n";
 
         std::cout << "D3D12 Video Encode capability dump for " << width << "x" << height << "\n\n";
         const auto caps = D3D12VideoEncoder::QueryD3D12VideoEncodeCapabilities(core.get(), width, height);

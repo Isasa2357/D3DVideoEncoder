@@ -31,6 +31,25 @@
 
 ---
 
+## D3DHelper migration validation
+
+最新安定版 D3DHelper への移行結果です。詳細、試験条件、既知問題は
+[`D3DVideoEncoder_D3DHelper_Migration_Final_Report_JA.md`](D3DVideoEncoder_D3DHelper_Migration_Final_Report_JA.md)
+を参照してください。
+
+| Backend | Build | Short encode | Async | MP4 | Long test | Status |
+|---|---|---|---|---|---|---|
+| Native D3D12 | pass | pass | pass | pass | pass | validated |
+| NVENC D3D11 | pass | pass | pass | pass | pass | validated |
+| NVENC D3D12 | pass | pass | pass | pass | pass | validated |
+| D3D11 Media Foundation | pass | fail | unverified | fail/unverified | not run | known issues |
+
+D3D12 adapter LUID は system restart を越えて固定値として扱いません。実行中の
+`ID3D12Device::GetAdapterLuid()` の値を使用し、同じ process/session 内で
+`IDXGIFactory4::EnumAdapterByLuid()` と adapter identity を照合してください。
+
+---
+
 ## native D3D12 Video Encode v0.1 の対応範囲
 
 native `D3D12VideoEncode` backend は、Windows / GPU / driver の D3D12 Video Encode 対応に依存します。使用前に `QueryD3D12VideoEncodeSupport()` または capability dump sample で確認してください。
@@ -59,7 +78,7 @@ native `D3D12VideoEncode` backend は、Windows / GPU / driver の D3D12 Video E
   - AV1 native D3D12 Video Encode
   - D3D12 + Media Foundation backend
   - full-featured MP4/MKV muxer
-  - driverがVPS/SPS/PPSを出さない場合のparameter-set injection
+  - driverがHEVC VPS/SPS/PPSを出さない場合のparameter-set injection
 ```
 
 `bFrameCount > 0` は現在の backend では明確な `D3DVideoEncoderError` として拒否します。`D3D12VideoEncodeFrameScheduler` は将来の B-frame 実装に向けた **experimental/internal planning layer** です。現時点では backend 本体には接続していません。
@@ -68,8 +87,8 @@ native `D3D12VideoEncode` backend は、Windows / GPU / driver の D3D12 Video E
 
 ## 依存関係
 
-- D3D11Helper: <https://github.com/Isasa2357/D3D11Helper>
-- D3D12Helper: <https://github.com/Isasa2357/D3D12Helper>
+- D3D11Helper v1.13.0: `8711cd297f8af527c2d4701f9f522e54f29ad5b8`
+- D3D12Helper v1.13.0: `98e97d7b5dfa02063152549b05211d7408edc524`
 
 CMakeでは `FetchContent` により、未指定なら GitHub から自動取得します。
 

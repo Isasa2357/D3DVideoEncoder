@@ -3,6 +3,7 @@
 #include <D3DVideoEncoder/D3D12VideoEncoder.hpp>
 
 #include <D3D12Helper/D3D12Core/D3D12Core.hpp>
+#include <D3D12Helper/D3D12Core/D3D12Barrier.hpp>
 
 #include <Windows.h>
 #include <d3d12.h>
@@ -82,6 +83,7 @@ void wait_for_queue(ID3D12Device* device, ID3D12CommandQueue* queue) {
 void upload_nv12_frame(
     D3D12CoreLib::D3D12Core& core,
     ID3D12Resource* texture,
+    D3D12_RESOURCE_STATES& textureState,
     uint32_t width,
     uint32_t height,
     uint32_t frameIndex) {
@@ -89,11 +91,11 @@ void upload_nv12_frame(
     ID3D12Device* device = core.GetDevice();
     const auto textureDesc = texture->GetDesc();
 
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
-    UINT numRows = 0;
-    UINT64 rowSize = 0;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprints[2] = {};
+    UINT numRows[2] = {};
+    UINT64 rowSizes[2] = {};
     UINT64 totalBytes = 0;
-    device->GetCopyableFootprints(&textureDesc, 0, 1, 0, &footprint, &numRows, &rowSize, &totalBytes);
+    device->GetCopyableFootprints(&textureDesc, 0, 2, 0, footprints, numRows, rowSizes, &totalBytes);
 
     const auto uploadHeap = heap_properties(D3D12_HEAP_TYPE_UPLOAD);
     const auto uploadDesc = buffer_desc(totalBytes);
@@ -113,17 +115,16 @@ void upload_nv12_frame(
     std::fill(bytes, bytes + static_cast<size_t>(totalBytes), 128);
 
     for (uint32_t y = 0; y < height; ++y) {
-        uint8_t* row = bytes + footprint.Offset + static_cast<size_t>(y) * footprint.Footprint.RowPitch;
+        uint8_t* row = bytes + footprints[0].Offset + static_cast<size_t>(y) * footprints[0].Footprint.RowPitch;
         for (uint32_t x = 0; x < width; ++x) {
             row[x] = static_cast<uint8_t>(32 + ((x * 2 + y + frameIndex * 11) & 0x7f));
         }
     }
 
     // Interleaved UV plane. Keep it neutral with a small moving tint so the chroma path is exercised too.
-    const uint32_t uvBaseRow = height;
     const uint32_t uvRows = height / 2;
     for (uint32_t y = 0; y < uvRows; ++y) {
-        uint8_t* row = bytes + footprint.Offset + static_cast<size_t>(uvBaseRow + y) * footprint.Footprint.RowPitch;
+        uint8_t* row = bytes + footprints[1].Offset + static_cast<size_t>(y) * footprints[1].Footprint.RowPitch;
         for (uint32_t x = 0; x < width; x += 2) {
             row[x + 0] = static_cast<uint8_t>(120 + ((frameIndex + y) & 0x0f));
             row[x + 1] = static_cast<uint8_t>(136 - ((frameIndex + x / 2) & 0x0f));
@@ -136,17 +137,29 @@ void upload_nv12_frame(
     throw_if_failed(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "CreateCommandAllocator");
     throw_if_failed(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&commandList)), "CreateCommandList");
 
-    D3D12_TEXTURE_COPY_LOCATION dst = {};
-    dst.pResource = texture;
-    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    dst.SubresourceIndex = 0;
+    if (textureState != D3D12_RESOURCE_STATE_COPY_DEST) {
+        const auto toCopy = D3D12CoreLib::MakeTransitionBarrier(texture, textureState, D3D12_RESOURCE_STATE_COPY_DEST);
+        commandList->ResourceBarrier(1, &toCopy);
+        textureState = D3D12_RESOURCE_STATE_COPY_DEST;
+    }
+    for (UINT subresource = 0; subresource < 2; ++subresource) {
+        D3D12_TEXTURE_COPY_LOCATION dst = {};
+        dst.pResource = texture;
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = subresource;
 
-    D3D12_TEXTURE_COPY_LOCATION src = {};
-    src.pResource = upload.Get();
-    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    src.PlacedFootprint = footprint;
-
-    commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        D3D12_TEXTURE_COPY_LOCATION src = {};
+        src.pResource = upload.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint = footprints[subresource];
+        commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
+    const auto handoff = D3D12CoreLib::MakeTransitionBarrier(
+        texture,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_COMMON);
+    commandList->ResourceBarrier(1, &handoff);
+    textureState = D3D12_RESOURCE_STATE_COMMON;
     throw_if_failed(commandList->Close(), "Close upload command list");
     ID3D12CommandList* lists[] = { commandList.Get() };
     core.GetDirectCommandQueue()->ExecuteCommandLists(1, lists);
@@ -233,9 +246,10 @@ int main() {
         desc.input.restoreStateAfterEncode = true;
 
         D3D12VideoEncoder encoder(desc);
+        D3D12_RESOURCE_STATES textureState = D3D12_RESOURCE_STATE_COPY_DEST;
         for (uint32_t i = 0; i < frames; ++i) {
-            upload_nv12_frame(*core, texture.Get(), sourceWidth, sourceHeight, i);
-            encoder.write(texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST);
+            upload_nv12_frame(*core, texture.Get(), textureState, sourceWidth, sourceHeight, i);
+            encoder.write(texture.Get(), textureState);
         }
         encoder.close();
 
