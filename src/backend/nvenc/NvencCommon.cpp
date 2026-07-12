@@ -1,8 +1,11 @@
 #include "backend/nvenc/NvencCommon.hpp"
+#include "backend/nvenc/NvencD3D12OutputStrategy.hpp"
+#include "backend/nvenc/NvencLifecyclePolicy.hpp"
 
 #include <algorithm>
 #include <exception>
 #include <filesystem>
+#include <iostream>
 #include <sstream>
 #include <vector>
 
@@ -123,6 +126,13 @@ bool GuidEqual(const GUID& a, const GUID& b) noexcept {
     return IsEqualGUID(a, b) != FALSE;
 }
 
+bool EnvEnabled(const char* name) noexcept {
+    char value[16] = {};
+    const DWORD length = GetEnvironmentVariableA(name, value, static_cast<DWORD>(std::size(value)));
+    if (length == 0) return false;
+    return value[0] != '0';
+}
+
 } // namespace
 
 NvencFormatCapability QueryNvencDeviceSupport(void* device, NV_ENC_DEVICE_TYPE deviceType, VideoCodec codec, VideoPixelFormat inputFormat) {
@@ -214,6 +224,8 @@ NvencFormatCapability QueryNvencDeviceSupport(void* device, NV_ENC_DEVICE_TYPE d
     return result;
 }
 
+NvencEncoderSession::NvencEncoderSession() = default;
+
 NvencEncoderSession::~NvencEncoderSession() {
     try {
         close();
@@ -293,7 +305,17 @@ std::string NvencEncoderSession::describe() const {
     return oss.str();
 }
 
-void NvencEncoderSession::initialize(void* device, NV_ENC_DEVICE_TYPE deviceType, const NvencSessionDesc& desc) {
+void NvencEncoderSession::trace(const std::string& message) const {
+    if (traceEnabled_) {
+        std::cerr << "[NVENC TRACE] " << message << std::endl;
+    }
+}
+
+void NvencEncoderSession::initialize(
+    void* device,
+    NV_ENC_DEVICE_TYPE deviceType,
+    NvencDirectXDeviceKind deviceKind,
+    const NvencSessionDesc& desc) {
     if (!device) {
         throw D3DVideoEncoderError("NVENC initialize received a null D3D device.");
     }
@@ -311,6 +333,13 @@ void NvencEncoderSession::initialize(void* device, NV_ENC_DEVICE_TYPE deviceType
     }
 
     desc_ = desc;
+    deviceKind_ = deviceKind;
+    traceEnabled_ = EnvEnabled("D3DVE_NVENC_TRACE");
+    internalAsync_ = deviceKind_ == NvencDirectXDeviceKind::D3D11 && EnvEnabled("D3DVE_NVENC_INTERNAL_ASYNC");
+    sentFrameCount_ = 0;
+    receivedPacketCount_ = 0;
+    eosSent_ = false;
+    trace(describe() + ": initialize begin internalAsync=" + std::string(internalAsync_ ? "true" : "false"));
     api_.load();
 
     NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS openParams = {};
@@ -320,11 +349,36 @@ void NvencEncoderSession::initialize(void* device, NV_ENC_DEVICE_TYPE deviceType
     openParams.apiVersion = NVENCAPI_VERSION;
     D3DVE_THROW_IF_NVENC_FAILED_MSG(api_.functions().nvEncOpenEncodeSessionEx(&openParams, &encoder_), describe() + ": nvEncOpenEncodeSessionEx");
 
-    NV_ENC_CONFIG encodeConfig = {};
+    const GUID codec = codecGuid();
+    const GUID preset = presetGuid();
+    const NV_ENC_TUNING_INFO tuningInfo =
+#if NVENCAPI_MAJOR_VERSION >= 11
+        NV_ENC_TUNING_INFO_HIGH_QUALITY;
+#else
+        NV_ENC_TUNING_INFO_UNDEFINED;
+#endif
+
+    NV_ENC_PRESET_CONFIG presetConfig = {};
+    presetConfig.version = NV_ENC_PRESET_CONFIG_VER;
+    presetConfig.presetCfg.version = NV_ENC_CONFIG_VER;
+#if NVENCAPI_MAJOR_VERSION >= 11
+    D3DVE_THROW_IF_NVENC_FAILED_MSG(
+        api_.functions().nvEncGetEncodePresetConfigEx(encoder_, codec, preset, tuningInfo, &presetConfig),
+        describe() + ": nvEncGetEncodePresetConfigEx");
+#else
+    D3DVE_THROW_IF_NVENC_FAILED_MSG(
+        api_.functions().nvEncGetEncodePresetConfig(encoder_, codec, preset, &presetConfig),
+        describe() + ": nvEncGetEncodePresetConfig");
+#endif
+
+    NV_ENC_CONFIG encodeConfig = presetConfig.presetCfg;
     encodeConfig.version = NV_ENC_CONFIG_VER;
+    encodeConfig.rcParams.version = NV_ENC_RC_PARAMS_VER;
     encodeConfig.profileGUID = profileGuid();
     encodeConfig.gopLength = desc_.gopLength;
     encodeConfig.frameIntervalP = desc_.bFrameCount + 1;
+    encodeConfig.frameFieldMode = NV_ENC_PARAMS_FRAME_FIELD_MODE_FRAME;
+    encodeConfig.mvPrecision = NV_ENC_MV_PRECISION_DEFAULT;
     encodeConfig.rcParams.rateControlMode = rateControlMode();
     encodeConfig.rcParams.averageBitRate = desc_.bitrate;
     encodeConfig.rcParams.maxBitRate = desc_.bitrate;
@@ -337,9 +391,16 @@ void NvencEncoderSession::initialize(void* device, NV_ENC_DEVICE_TYPE deviceType
     if (desc_.codec == VideoCodec::H264) {
         encodeConfig.encodeCodecConfig.h264Config.repeatSPSPPS = 1;
         encodeConfig.encodeCodecConfig.h264Config.idrPeriod = desc_.gopLength;
+        encodeConfig.encodeCodecConfig.h264Config.chromaFormatIDC = 1;
+        encodeConfig.encodeCodecConfig.h264Config.inputBitDepth = NV_ENC_BIT_DEPTH_8;
+        encodeConfig.encodeCodecConfig.h264Config.outputBitDepth = NV_ENC_BIT_DEPTH_8;
     } else if (desc_.codec == VideoCodec::HEVC) {
         encodeConfig.encodeCodecConfig.hevcConfig.repeatSPSPPS = 1;
         encodeConfig.encodeCodecConfig.hevcConfig.idrPeriod = desc_.gopLength;
+        encodeConfig.encodeCodecConfig.hevcConfig.inputBitDepth = (desc_.inputFormat == VideoPixelFormat::P010)
+            ? NV_ENC_BIT_DEPTH_10
+            : NV_ENC_BIT_DEPTH_8;
+        encodeConfig.encodeCodecConfig.hevcConfig.outputBitDepth = encodeConfig.encodeCodecConfig.hevcConfig.inputBitDepth;
 #ifdef NV_ENC_CONFIG_HEVC_VUI_PARAMETERS_VER
         (void)0;
 #endif
@@ -353,8 +414,8 @@ void NvencEncoderSession::initialize(void* device, NV_ENC_DEVICE_TYPE deviceType
 
     NV_ENC_INITIALIZE_PARAMS init = {};
     init.version = NV_ENC_INITIALIZE_PARAMS_VER;
-    init.encodeGUID = codecGuid();
-    init.presetGUID = presetGuid();
+    init.encodeGUID = codec;
+    init.presetGUID = preset;
     init.encodeWidth = desc_.width;
     init.encodeHeight = desc_.height;
     init.darWidth = desc_.width;
@@ -362,32 +423,123 @@ void NvencEncoderSession::initialize(void* device, NV_ENC_DEVICE_TYPE deviceType
     init.frameRateNum = desc_.frameRateNum;
     init.frameRateDen = desc_.frameRateDen;
     init.enablePTD = 1;
+    init.enableEncodeAsync = internalAsync_ ? 1u : 0u;
+    init.enableOutputInVidmem = 0;
     init.reportSliceOffsets = 0;
     init.enableSubFrameWrite = 0;
+    init.maxEncodeWidth = desc_.width;
+    init.maxEncodeHeight = desc_.height;
 #if NVENCAPI_MAJOR_VERSION >= 11
-    init.tuningInfo = NV_ENC_TUNING_INFO_HIGH_QUALITY;
+    init.tuningInfo = tuningInfo;
 #endif
+    init.bufferFormat = bufferFormat();
     init.encodeConfig = &encodeConfig;
 
-    D3DVE_THROW_IF_NVENC_FAILED_MSG(api_.functions().nvEncInitializeEncoder(encoder_, &init), describe() + ": nvEncInitializeEncoder");
+    trace(describe() + ": nvEncInitializeEncoder begin enableEncodeAsync=" + std::to_string(init.enableEncodeAsync));
+    const NVENCSTATUS initStatus = api_.functions().nvEncInitializeEncoder(encoder_, &init);
+    trace(describe() + ": nvEncInitializeEncoder end status=" + NvencStatusToString(initStatus));
+    if (initStatus != NV_ENC_SUCCESS) {
+        std::ostringstream message;
+        message << describe() << ": nvEncInitializeEncoder";
+        if (api_.functions().nvEncGetLastErrorString) {
+            if (const char* lastError = api_.functions().nvEncGetLastErrorString(encoder_)) {
+                message << " lastError=\"" << lastError << "\"";
+            }
+        }
+        ThrowNvenc(initStatus, "api_.functions().nvEncInitializeEncoder(encoder_, &init)", __FILE__, __LINE__, message.str());
+    }
+
+    if (internalAsync_) {
+        registerAsyncEvent();
+    }
 
     muxer_.open(desc_.outputPath, desc_.width, desc_.height, desc_.frameRateNum, desc_.frameRateDen, desc_.codec);
 
-    createBitstreamBuffer();
+    if (deviceKind_ == NvencDirectXDeviceKind::D3D12) {
+        // SDK sample buffer count: frameIntervalP + lookaheadDepth + extraOutputDelay.
+        // This backend does not enable temporal filtering and uses the sample's default extra delay of 3.
+        const uint32_t ringSize = std::max<uint32_t>(
+            4u,
+            encodeConfig.frameIntervalP + encodeConfig.rcParams.lookaheadDepth + 3u);
+        d3d12Output_ = std::make_unique<NvencD3D12OutputStrategy>(ringSize);
+        d3d12Output_->initialize(
+            static_cast<ID3D12Device*>(device),
+            encoder_,
+            &api_.functions(),
+            desc_.width,
+            desc_.height,
+            desc_.inputFormat,
+            traceEnabled_);
+    } else {
+        createBitstreamBuffer();
+    }
+    trace(describe() + ": initialize complete");
 }
 
 void NvencEncoderSession::createBitstreamBuffer() {
     NV_ENC_CREATE_BITSTREAM_BUFFER create = {};
     create.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
-    D3DVE_THROW_IF_NVENC_FAILED_MSG(api_.functions().nvEncCreateBitstreamBuffer(encoder_, &create), describe() + ": nvEncCreateBitstreamBuffer");
+    trace(describe() + ": nvEncCreateBitstreamBuffer begin");
+    const NVENCSTATUS status = api_.functions().nvEncCreateBitstreamBuffer(encoder_, &create);
+    trace(describe() + ": nvEncCreateBitstreamBuffer end status=" + NvencStatusToString(status) + " buffer=" + std::to_string(reinterpret_cast<uintptr_t>(create.bitstreamBuffer)));
+    D3DVE_THROW_IF_NVENC_FAILED_MSG(status, describe() + ": nvEncCreateBitstreamBuffer");
     bitstreamBuffer_ = create.bitstreamBuffer;
 }
 
 void NvencEncoderSession::destroyBitstreamBuffer() noexcept {
     if (encoder_ && bitstreamBuffer_) {
+        trace(describe() + ": nvEncDestroyBitstreamBuffer begin");
         api_.functions().nvEncDestroyBitstreamBuffer(encoder_, bitstreamBuffer_);
+        trace(describe() + ": nvEncDestroyBitstreamBuffer end");
         bitstreamBuffer_ = nullptr;
     }
+}
+
+void NvencEncoderSession::registerAsyncEvent() {
+    if (completionEvent_) return;
+    completionEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!completionEvent_) {
+        throw D3DVideoEncoderError("NVENC internal async diagnostic failed to create completion event.");
+    }
+    NV_ENC_EVENT_PARAMS eventParams = {};
+    eventParams.version = NV_ENC_EVENT_PARAMS_VER;
+    eventParams.completionEvent = completionEvent_;
+    trace(describe() + ": nvEncRegisterAsyncEvent begin event=" + std::to_string(reinterpret_cast<uintptr_t>(completionEvent_)));
+    const NVENCSTATUS status = api_.functions().nvEncRegisterAsyncEvent(encoder_, &eventParams);
+    trace(describe() + ": nvEncRegisterAsyncEvent end status=" + NvencStatusToString(status));
+    D3DVE_THROW_IF_NVENC_FAILED_MSG(status, describe() + ": nvEncRegisterAsyncEvent");
+    completionEventRegistered_ = true;
+}
+
+void NvencEncoderSession::unregisterAsyncEvent() noexcept {
+    if (encoder_ && completionEvent_ && completionEventRegistered_) {
+        NV_ENC_EVENT_PARAMS eventParams = {};
+        eventParams.version = NV_ENC_EVENT_PARAMS_VER;
+        eventParams.completionEvent = completionEvent_;
+        trace(describe() + ": nvEncUnregisterAsyncEvent begin");
+        api_.functions().nvEncUnregisterAsyncEvent(encoder_, &eventParams);
+        trace(describe() + ": nvEncUnregisterAsyncEvent end");
+        completionEventRegistered_ = false;
+    }
+    if (completionEvent_) {
+        CloseHandle(completionEvent_);
+        completionEvent_ = nullptr;
+    }
+}
+
+bool NvencEncoderSession::waitForAsyncCompletion(const char* operation, uint32_t frameIndex) {
+    if (!internalAsync_) return true;
+    trace(describe() + ": completion event wait start operation=" + std::string(operation ? operation : "(unknown)") +
+          " frame=" + std::to_string(frameIndex));
+    const DWORD wait = WaitForSingleObject(completionEvent_, 30000);
+    trace(describe() + ": completion event wait end result=" + std::to_string(wait) +
+          " operation=" + std::string(operation ? operation : "(unknown)") +
+          " frame=" + std::to_string(frameIndex));
+    if (wait == WAIT_OBJECT_0) return true;
+    if (wait == WAIT_TIMEOUT) {
+        throw D3DVideoEncoderError("NVENC internal async completion event timed out.");
+    }
+    throw D3DVideoEncoderError("NVENC internal async completion event wait failed.");
 }
 
 NvencEncoderSession::RegisteredInputResource& NvencEncoderSession::getOrRegisterResource(void* resource) {
@@ -406,7 +558,22 @@ NvencEncoderSession::RegisteredInputResource& NvencEncoderSession::getOrRegister
     reg.pitch = 0;
     reg.bufferFormat = bufferFormat();
     reg.bufferUsage = NV_ENC_INPUT_IMAGE;
-    D3DVE_THROW_IF_NVENC_FAILED_MSG(api_.functions().nvEncRegisterResource(encoder_, &reg), describe() + ": nvEncRegisterResource");
+    NV_ENC_FENCE_POINT_D3D12 d3d12RegistrationFence = {};
+    if (deviceKind_ == NvencDirectXDeviceKind::D3D12) {
+        if (!d3d12Output_) {
+            throw D3DVideoEncoderError("NVENC D3D12 output strategy is unavailable during input registration.");
+        }
+        d3d12RegistrationFence = d3d12Output_->beginInputRegistration();
+        reg.pInputFencePoint = &d3d12RegistrationFence;
+    }
+    trace(describe() + ": nvEncRegisterResource begin resource=" + std::to_string(reinterpret_cast<uintptr_t>(resource)));
+    const NVENCSTATUS status = api_.functions().nvEncRegisterResource(encoder_, &reg);
+    trace(describe() + ": nvEncRegisterResource end status=" + NvencStatusToString(status) +
+          " registered=" + std::to_string(reinterpret_cast<uintptr_t>(reg.registeredResource)));
+    D3DVE_THROW_IF_NVENC_FAILED_MSG(status, describe() + ": nvEncRegisterResource");
+    if (deviceKind_ == NvencDirectXDeviceKind::D3D12) {
+        d3d12Output_->waitForInputRegistration(d3d12RegistrationFence.signalValue);
+    }
 
     RegisteredInputResource entry;
     entry.resourceKey = resource;
@@ -428,7 +595,9 @@ void NvencEncoderSession::unregisterAllResources() noexcept {
     if (encoder_) {
         for (auto& entry : registeredResources_) {
             if (entry.registeredResource) {
+                trace(describe() + ": nvEncUnregisterResource begin registered=" + std::to_string(reinterpret_cast<uintptr_t>(entry.registeredResource)));
                 api_.functions().nvEncUnregisterResource(encoder_, entry.registeredResource);
+                trace(describe() + ": nvEncUnregisterResource end");
                 entry.registeredResource = nullptr;
             }
             entry.keepAlive.Reset();
@@ -442,7 +611,11 @@ void NvencEncoderSession::writeBitstream(void* bitstreamBuffer) {
     lock.version = NV_ENC_LOCK_BITSTREAM_VER;
     lock.outputBitstream = bitstreamBuffer;
     lock.doNotWait = 0;
-    D3DVE_THROW_IF_NVENC_FAILED_MSG(api_.functions().nvEncLockBitstream(encoder_, &lock), describe() + ": nvEncLockBitstream");
+    trace(describe() + ": nvEncLockBitstream start slot=0 received=" + std::to_string(receivedPacketCount_));
+    const NVENCSTATUS lockStatus = api_.functions().nvEncLockBitstream(encoder_, &lock);
+    trace(describe() + ": nvEncLockBitstream end status=" + NvencStatusToString(lockStatus) +
+          " bytes=" + std::to_string(lock.bitstreamSizeInBytes));
+    D3DVE_THROW_IF_NVENC_FAILED_MSG(lockStatus, describe() + ": nvEncLockBitstream");
 
     try {
         if (lock.bitstreamBufferPtr && lock.bitstreamSizeInBytes > 0) {
@@ -453,11 +626,17 @@ void NvencEncoderSession::writeBitstream(void* bitstreamBuffer) {
                 currentDuration100ns_);
         }
     } catch (...) {
+        trace(describe() + ": nvEncUnlockBitstream begin after writer exception");
         api_.functions().nvEncUnlockBitstream(encoder_, bitstreamBuffer);
+        trace(describe() + ": nvEncUnlockBitstream end after writer exception");
         throw;
     }
 
-    D3DVE_THROW_IF_NVENC_FAILED_MSG(api_.functions().nvEncUnlockBitstream(encoder_, bitstreamBuffer), describe() + ": nvEncUnlockBitstream");
+    trace(describe() + ": nvEncUnlockBitstream begin");
+    const NVENCSTATUS unlockStatus = api_.functions().nvEncUnlockBitstream(encoder_, bitstreamBuffer);
+    trace(describe() + ": nvEncUnlockBitstream end status=" + NvencStatusToString(unlockStatus));
+    D3DVE_THROW_IF_NVENC_FAILED_MSG(unlockStatus, describe() + ": nvEncUnlockBitstream");
+    ++receivedPacketCount_;
 }
 
 void NvencEncoderSession::encodeDirectXResource(void* resource, int64_t timestamp100ns, int64_t duration100ns) {
@@ -468,6 +647,11 @@ void NvencEncoderSession::encodeDirectXResource(void* resource, int64_t timestam
         throw D3DVideoEncoderError("NVENC encode received a null resource.");
     }
 
+    if (deviceKind_ == NvencDirectXDeviceKind::D3D12) {
+        encodeD3D12Resource(resource, timestamp100ns, duration100ns);
+        return;
+    }
+
     auto& registered = getOrRegisterResource(resource);
     void* mappedResource = nullptr;
 
@@ -475,7 +659,12 @@ void NvencEncoderSession::encodeDirectXResource(void* resource, int64_t timestam
         NV_ENC_MAP_INPUT_RESOURCE map = {};
         map.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
         map.registeredResource = registered.registeredResource;
-        D3DVE_THROW_IF_NVENC_FAILED_MSG(api_.functions().nvEncMapInputResource(encoder_, &map), describe() + ": nvEncMapInputResource");
+        trace(describe() + ": nvEncMapInputResource begin frame=" + std::to_string(sentFrameCount_) +
+              " registered=" + std::to_string(reinterpret_cast<uintptr_t>(registered.registeredResource)));
+        const NVENCSTATUS mapStatus = api_.functions().nvEncMapInputResource(encoder_, &map);
+        trace(describe() + ": nvEncMapInputResource end status=" + NvencStatusToString(mapStatus) +
+              " mapped=" + std::to_string(reinterpret_cast<uintptr_t>(map.mappedResource)));
+        D3DVE_THROW_IF_NVENC_FAILED_MSG(mapStatus, describe() + ": nvEncMapInputResource");
         mappedResource = map.mappedResource;
 
         NV_ENC_PIC_PARAMS pic = {};
@@ -485,25 +674,90 @@ void NvencEncoderSession::encodeDirectXResource(void* resource, int64_t timestam
         pic.inputWidth = desc_.width;
         pic.inputHeight = desc_.height;
         pic.outputBitstream = bitstreamBuffer_;
+        pic.completionEvent = internalAsync_ ? completionEvent_ : nullptr;
         pic.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
         pic.inputTimeStamp = static_cast<uint64_t>(timestamp100ns);
         (void)duration100ns;
 
         currentTimestamp100ns_ = timestamp100ns;
         currentDuration100ns_ = duration100ns;
+        trace(describe() + ": nvEncEncodePicture begin frame=" + std::to_string(sentFrameCount_) +
+              " slot=0 internalAsync=" + std::string(internalAsync_ ? "true" : "false"));
         const NVENCSTATUS encodeStatus = api_.functions().nvEncEncodePicture(encoder_, &pic);
+        trace(describe() + ": nvEncEncodePicture end frame=" + std::to_string(sentFrameCount_) +
+              " status=" + NvencStatusToString(encodeStatus));
         if (encodeStatus != NV_ENC_SUCCESS && encodeStatus != NV_ENC_ERR_NEED_MORE_INPUT) {
             ThrowNvenc(encodeStatus, "nvEncEncodePicture", __FILE__, __LINE__, describe());
         }
+        ++sentFrameCount_;
         if (encodeStatus == NV_ENC_SUCCESS) {
+            waitForAsyncCompletion("encode", static_cast<uint32_t>(sentFrameCount_ - 1));
             writeBitstream(bitstreamBuffer_);
         }
 
-        D3DVE_THROW_IF_NVENC_FAILED_MSG(api_.functions().nvEncUnmapInputResource(encoder_, mappedResource), describe() + ": nvEncUnmapInputResource");
+        trace(describe() + ": nvEncUnmapInputResource begin frame=" + std::to_string(sentFrameCount_ - 1));
+        const NVENCSTATUS unmapStatus = api_.functions().nvEncUnmapInputResource(encoder_, mappedResource);
+        trace(describe() + ": nvEncUnmapInputResource end status=" + NvencStatusToString(unmapStatus));
+        D3DVE_THROW_IF_NVENC_FAILED_MSG(unmapStatus, describe() + ": nvEncUnmapInputResource");
         mappedResource = nullptr;
     } catch (...) {
         if (mappedResource) {
+            trace(describe() + ": nvEncUnmapInputResource begin during exception");
             api_.functions().nvEncUnmapInputResource(encoder_, mappedResource);
+            trace(describe() + ": nvEncUnmapInputResource end during exception");
+        }
+        throw;
+    }
+}
+
+void NvencEncoderSession::encodeD3D12Resource(void* resource, int64_t timestamp100ns, int64_t duration100ns) {
+    if (!d3d12Output_) {
+        throw D3DVideoEncoderError("NVENC D3D12 output strategy is not initialized.");
+    }
+
+    auto& registered = getOrRegisterResource(resource);
+    const auto prepared = d3d12Output_->prepare(
+        registered.registeredResource,
+        sentFrameCount_,
+        timestamp100ns,
+        duration100ns);
+
+    try {
+        NV_ENC_PIC_PARAMS pic = {};
+        pic.version = NV_ENC_PIC_PARAMS_VER;
+        pic.inputBuffer = prepared.input;
+        pic.bufferFmt = bufferFormat();
+        pic.inputWidth = desc_.width;
+        pic.inputHeight = desc_.height;
+        pic.outputBitstream = prepared.output;
+        pic.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
+        pic.inputTimeStamp = static_cast<uint64_t>(timestamp100ns);
+
+        trace(describe() + ": D3D12 nvEncEncodePicture begin frame=" + std::to_string(sentFrameCount_) +
+              " slot=" + std::to_string(prepared.slotIndex));
+        const NVENCSTATUS status = api_.functions().nvEncEncodePicture(encoder_, &pic);
+        trace(describe() + ": D3D12 nvEncEncodePicture end frame=" + std::to_string(sentFrameCount_) +
+              " status=" + NvencStatusToString(status));
+        if (status != NV_ENC_SUCCESS && status != NV_ENC_ERR_NEED_MORE_INPUT) {
+            std::string message = describe();
+            if (api_.functions().nvEncGetLastErrorString) {
+                if (const char* lastError = api_.functions().nvEncGetLastErrorString(encoder_)) {
+                    message += std::string(": ") + lastError;
+                }
+            }
+            ThrowNvenc(status, "nvEncEncodePicture", __FILE__, __LINE__, message);
+        }
+
+        d3d12Output_->commit(prepared);
+        ++sentFrameCount_;
+        if (status == NV_ENC_SUCCESS) {
+            d3d12Output_->drainNext(muxer_);
+            receivedPacketCount_ = d3d12Output_->receivedCount();
+        }
+    } catch (...) {
+        if (prepared.slotIndex < d3d12Output_->slotCount() &&
+            d3d12Output_->slotState(prepared.slotIndex) == NvencD3D12OutputStrategy::SlotState::Prepared) {
+            d3d12Output_->rollback(prepared);
         }
         throw;
     }
@@ -512,24 +766,69 @@ void NvencEncoderSession::encodeDirectXResource(void* resource, int64_t timestam
 void NvencEncoderSession::flush() {
     if (!encoder_ || eosSent_) return;
 
+    if (deviceKind_ == NvencDirectXDeviceKind::D3D12) {
+        flushD3D12();
+        return;
+    }
+
     NV_ENC_PIC_PARAMS eos = {};
     eos.version = NV_ENC_PIC_PARAMS_VER;
     eos.encodePicFlags = NV_ENC_PIC_FLAG_EOS;
     eos.outputBitstream = bitstreamBuffer_;
+    eos.completionEvent = internalAsync_ ? completionEvent_ : nullptr;
+    trace(describe() + ": nvEncEncodePicture(EOS) begin sent=" + std::to_string(sentFrameCount_) +
+          " received=" + std::to_string(receivedPacketCount_));
     const NVENCSTATUS status = api_.functions().nvEncEncodePicture(encoder_, &eos);
+    trace(describe() + ": nvEncEncodePicture(EOS) end status=" + NvencStatusToString(status));
     if (status != NV_ENC_SUCCESS && status != NV_ENC_ERR_NEED_MORE_INPUT) {
         ThrowNvenc(status, "nvEncEncodePicture(EOS)", __FILE__, __LINE__, describe());
     }
-    if (status == NV_ENC_SUCCESS) {
+    if (ShouldDrainNvencEos(status, sentFrameCount_, receivedPacketCount_)) {
         try {
+            waitForAsyncCompletion("EOS", static_cast<uint32_t>(sentFrameCount_));
             writeBitstream(bitstreamBuffer_);
         } catch (...) {
             // Some drivers signal EOS without producing an extra output packet.
             // Ignore empty/lock failures on EOS; previously encoded packets remain valid.
         }
+    } else if (status == NV_ENC_SUCCESS) {
+        trace(describe() + ": EOS produced no pending packet; skip nvEncLockBitstream sent=" +
+              std::to_string(sentFrameCount_) + " received=" + std::to_string(receivedPacketCount_));
     }
     eosSent_ = true;
+    trace(describe() + ": muxer flush begin");
     muxer_.flush();
+    trace(describe() + ": muxer flush end");
+}
+
+void NvencEncoderSession::flushD3D12() {
+    if (!d3d12Output_) {
+        throw D3DVideoEncoderError("NVENC D3D12 output strategy is not initialized during flush.");
+    }
+
+    NV_ENC_PIC_PARAMS eos = {};
+    eos.version = NV_ENC_PIC_PARAMS_VER;
+    eos.encodePicFlags = NV_ENC_PIC_FLAG_EOS;
+    trace(describe() + ": D3D12 nvEncEncodePicture(EOS) begin sent=" + std::to_string(sentFrameCount_) +
+          " received=" + std::to_string(receivedPacketCount_));
+    const NVENCSTATUS status = api_.functions().nvEncEncodePicture(encoder_, &eos);
+    trace(describe() + ": D3D12 nvEncEncodePicture(EOS) end status=" + NvencStatusToString(status));
+    if (status != NV_ENC_SUCCESS && status != NV_ENC_ERR_NEED_MORE_INPUT) {
+        ThrowNvenc(status, "nvEncEncodePicture(EOS)", __FILE__, __LINE__, describe());
+    }
+
+    if (d3d12Output_->outstandingCount() > 0) {
+        d3d12Output_->drainAll(muxer_);
+        receivedPacketCount_ = d3d12Output_->receivedCount();
+    } else if (status == NV_ENC_SUCCESS) {
+        trace(describe() + ": D3D12 EOS produced no pending packet; skip nvEncLockBitstream sent=" +
+              std::to_string(sentFrameCount_) + " received=" + std::to_string(receivedPacketCount_));
+    }
+
+    eosSent_ = true;
+    trace(describe() + ": muxer flush begin");
+    muxer_.flush();
+    trace(describe() + ": muxer flush end");
 }
 
 void NvencEncoderSession::close() {
@@ -542,14 +841,24 @@ void NvencEncoderSession::close() {
         pending = std::current_exception();
     }
 
+    trace(describe() + ": close begin");
+    if (d3d12Output_) {
+        d3d12Output_->release();
+        d3d12Output_.reset();
+    }
     destroyBitstreamBuffer();
     unregisterAllResources();
+    unregisterAsyncEvent();
 
     if (encoder_) {
+        trace(describe() + ": nvEncDestroyEncoder begin");
         api_.functions().nvEncDestroyEncoder(encoder_);
+        trace(describe() + ": nvEncDestroyEncoder end");
         encoder_ = nullptr;
     }
+    trace(describe() + ": muxer close begin");
     muxer_.close();
+    trace(describe() + ": muxer close end");
 
     if (pending) {
         std::rethrow_exception(pending);

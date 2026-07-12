@@ -1,4 +1,5 @@
 #include "backend/mux/NvencOutputMuxer.hpp"
+#include "backend/mux/NvencMp4DurationBoxes.hpp"
 
 #include <D3DVideoEncoder/D3DVideoEncoderError.hpp>
 
@@ -137,32 +138,32 @@ std::vector<uint8_t> MakeFtyp(VideoCodec codec) {
     return Box("ftyp", p);
 }
 
-std::vector<uint8_t> MakeMvhd(uint64_t duration) {
+std::vector<uint8_t> BuildMvhd(uint64_t duration) {
     std::vector<uint8_t> p;
-    PutU32(p, 0); PutU32(p, 0); PutU32(p, kTimeScale100ns); PutU32(p, static_cast<uint32_t>(duration));
+    PutU64(p, 0); PutU64(p, 0); PutU32(p, kTimeScale100ns); PutU64(p, duration);
     PutU32(p, 0x00010000); PutU16(p, 0x0100); PutU16(p, 0); PutU32(p, 0); PutU32(p, 0);
     const uint32_t matrix[9] = {0x00010000,0,0,0,0x00010000,0,0,0,0x40000000};
     for (uint32_t v: matrix) PutU32(p, v);
     for (int i=0;i<6;++i) PutU32(p,0);
     PutU32(p, 2);
-    return FullBox("mvhd", 0, 0, p);
+    return FullBox("mvhd", 1, 0, p);
 }
 
-std::vector<uint8_t> MakeTkhd(uint32_t width, uint32_t height, uint64_t duration) {
+std::vector<uint8_t> BuildTkhd(uint32_t width, uint32_t height, uint64_t duration) {
     std::vector<uint8_t> p;
-    PutU32(p,0); PutU32(p,0); PutU32(p,1); PutU32(p,0); PutU32(p,static_cast<uint32_t>(duration));
+    PutU64(p,0); PutU64(p,0); PutU32(p,1); PutU32(p,0); PutU64(p,duration);
     PutU32(p,0); PutU32(p,0); PutU16(p,0); PutU16(p,0); PutU16(p,0); PutU16(p,0);
     const uint32_t matrix[9] = {0x00010000,0,0,0,0x00010000,0,0,0,0x40000000};
     for (uint32_t v: matrix) PutU32(p, v);
     PutU32(p, width << 16); PutU32(p, height << 16);
-    return FullBox("tkhd", 0, 0x000007, p);
+    return FullBox("tkhd", 1, 0x000007, p);
 }
 
-std::vector<uint8_t> MakeMdhd(uint64_t duration) {
+std::vector<uint8_t> BuildMdhd(uint64_t duration) {
     std::vector<uint8_t> p;
-    PutU32(p,0); PutU32(p,0); PutU32(p,kTimeScale100ns); PutU32(p,static_cast<uint32_t>(duration));
+    PutU64(p,0); PutU64(p,0); PutU32(p,kTimeScale100ns); PutU64(p,duration);
     PutU16(p,0x55c4); PutU16(p,0);
-    return FullBox("mdhd",0,0,p);
+    return FullBox("mdhd",1,0,p);
 }
 
 std::vector<uint8_t> MakeHdlr() {
@@ -211,6 +212,14 @@ std::vector<uint8_t> EbmlString(uint32_t id, const std::string& value) { return 
 std::vector<uint8_t> EbmlBinary(uint32_t id, const std::vector<uint8_t>& value) { return Ebml(id, value); }
 
 } // namespace
+
+namespace NvencMuxerInternal {
+
+std::vector<uint8_t> MakeMvhd(uint64_t duration) { return BuildMvhd(duration); }
+std::vector<uint8_t> MakeTkhd(uint32_t width, uint32_t height, uint64_t duration) { return BuildTkhd(width, height, duration); }
+std::vector<uint8_t> MakeMdhd(uint64_t duration) { return BuildMdhd(duration); }
+
+} // namespace NvencMuxerInternal
 
 NvencOutputMuxer::~NvencOutputMuxer() { try { close(); } catch (...) {} }
 
@@ -311,9 +320,9 @@ void NvencOutputMuxer::writeMp4() {
     std::vector<uint8_t> drefP; PutU32(drefP,1); Append(drefP, FullBox("url ",0,1,{})); auto dinf = Box("dinf", FullBox("dref",0,0,drefP));
     std::vector<uint8_t> vmhdP; PutU16(vmhdP,0); PutU16(vmhdP,0); PutU16(vmhdP,0); PutU16(vmhdP,0); auto vmhd = FullBox("vmhd",0,1,vmhdP);
     std::vector<uint8_t> minfP; Append(minfP,vmhd); Append(minfP,dinf); Append(minfP,stbl); auto minf=Box("minf",minfP);
-    std::vector<uint8_t> mdiaP; Append(mdiaP,MakeMdhd(totalDuration)); Append(mdiaP,MakeHdlr()); Append(mdiaP,minf); auto mdia=Box("mdia",mdiaP);
-    std::vector<uint8_t> trakP; Append(trakP,MakeTkhd(width_,height_,totalDuration)); Append(trakP,mdia); auto trak=Box("trak",trakP);
-    std::vector<uint8_t> moovP; Append(moovP,MakeMvhd(totalDuration)); Append(moovP,trak); auto moov=Box("moov",moovP);
+    std::vector<uint8_t> mdiaP; Append(mdiaP,NvencMuxerInternal::MakeMdhd(totalDuration)); Append(mdiaP,MakeHdlr()); Append(mdiaP,minf); auto mdia=Box("mdia",mdiaP);
+    std::vector<uint8_t> trakP; Append(trakP,NvencMuxerInternal::MakeTkhd(width_,height_,totalDuration)); Append(trakP,mdia); auto trak=Box("trak",trakP);
+    std::vector<uint8_t> moovP; Append(moovP,NvencMuxerInternal::MakeMvhd(totalDuration)); Append(moovP,trak); auto moov=Box("moov",moovP);
 
     output_.open(std::filesystem::path(outputPath_), std::ios::binary | std::ios::trunc);
     if (!output_) throw D3DVideoEncoderError("Failed to open NVENC MP4 output file.");

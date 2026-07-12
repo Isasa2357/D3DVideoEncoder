@@ -38,31 +38,34 @@ struct ProfileStorage {
     D3D12_VIDEO_ENCODER_PROFILE_H264 h264 = D3D12_VIDEO_ENCODER_PROFILE_H264_HIGH;
     D3D12_VIDEO_ENCODER_PROFILE_HEVC hevc = D3D12_VIDEO_ENCODER_PROFILE_HEVC_MAIN;
     D3D12_VIDEO_ENCODER_PROFILE_DESC desc = {};
-};
 
-ProfileStorage make_profile(VideoCodec codec, VideoPixelFormat inputFormat) {
-    ProfileStorage s;
-    switch (codec) {
-    case VideoCodec::H264:
-        s.h264 = D3D12_VIDEO_ENCODER_PROFILE_H264_HIGH;
-        s.desc.DataSize = sizeof(s.h264);
-        s.desc.pH264Profile = &s.h264;
-        break;
-    case VideoCodec::HEVC:
-        s.hevc = (inputFormat == VideoPixelFormat::P010)
-            ? D3D12_VIDEO_ENCODER_PROFILE_HEVC_MAIN10
-            : D3D12_VIDEO_ENCODER_PROFILE_HEVC_MAIN;
-        s.desc.DataSize = sizeof(s.hevc);
-        s.desc.pHEVCProfile = &s.hevc;
-        break;
-    default:
-        s.h264 = D3D12_VIDEO_ENCODER_PROFILE_H264_HIGH;
-        s.desc.DataSize = sizeof(s.h264);
-        s.desc.pH264Profile = &s.h264;
-        break;
+    ProfileStorage(VideoCodec codec, VideoPixelFormat inputFormat) noexcept {
+        switch (codec) {
+        case VideoCodec::H264:
+            h264 = D3D12_VIDEO_ENCODER_PROFILE_H264_HIGH;
+            desc.DataSize = sizeof(h264);
+            desc.pH264Profile = &h264;
+            break;
+        case VideoCodec::HEVC:
+            hevc = (inputFormat == VideoPixelFormat::P010)
+                ? D3D12_VIDEO_ENCODER_PROFILE_HEVC_MAIN10
+                : D3D12_VIDEO_ENCODER_PROFILE_HEVC_MAIN;
+            desc.DataSize = sizeof(hevc);
+            desc.pHEVCProfile = &hevc;
+            break;
+        default:
+            h264 = D3D12_VIDEO_ENCODER_PROFILE_H264_HIGH;
+            desc.DataSize = sizeof(h264);
+            desc.pH264Profile = &h264;
+            break;
+        }
     }
-    return s;
-}
+
+    ProfileStorage(const ProfileStorage&) = delete;
+    ProfileStorage& operator=(const ProfileStorage&) = delete;
+    ProfileStorage(ProfileStorage&&) = delete;
+    ProfileStorage& operator=(ProfileStorage&&) = delete;
+};
 
 struct LevelStorage {
     D3D12_VIDEO_ENCODER_LEVELS_H264 h264Min = D3D12_VIDEO_ENCODER_LEVELS_H264_1;
@@ -71,23 +74,26 @@ struct LevelStorage {
     D3D12_VIDEO_ENCODER_LEVEL_TIER_CONSTRAINTS_HEVC hevcMax = { D3D12_VIDEO_ENCODER_LEVELS_HEVC_52, D3D12_VIDEO_ENCODER_TIER_HEVC_MAIN };
     D3D12_VIDEO_ENCODER_LEVEL_SETTING minDesc = {};
     D3D12_VIDEO_ENCODER_LEVEL_SETTING maxDesc = {};
-};
 
-LevelStorage make_level_storage(VideoCodec codec) {
-    LevelStorage s;
-    if (codec == VideoCodec::HEVC) {
-        s.minDesc.DataSize = sizeof(s.hevcMin);
-        s.minDesc.pHEVCLevelSetting = &s.hevcMin;
-        s.maxDesc.DataSize = sizeof(s.hevcMax);
-        s.maxDesc.pHEVCLevelSetting = &s.hevcMax;
-    } else {
-        s.minDesc.DataSize = sizeof(s.h264Min);
-        s.minDesc.pH264LevelSetting = &s.h264Min;
-        s.maxDesc.DataSize = sizeof(s.h264Max);
-        s.maxDesc.pH264LevelSetting = &s.h264Max;
+    explicit LevelStorage(VideoCodec codec) noexcept {
+        if (codec == VideoCodec::HEVC) {
+            minDesc.DataSize = sizeof(hevcMin);
+            minDesc.pHEVCLevelSetting = &hevcMin;
+            maxDesc.DataSize = sizeof(hevcMax);
+            maxDesc.pHEVCLevelSetting = &hevcMax;
+        } else {
+            minDesc.DataSize = sizeof(h264Min);
+            minDesc.pH264LevelSetting = &h264Min;
+            maxDesc.DataSize = sizeof(h264Max);
+            maxDesc.pH264LevelSetting = &h264Max;
+        }
     }
-    return s;
-}
+
+    LevelStorage(const LevelStorage&) = delete;
+    LevelStorage& operator=(const LevelStorage&) = delete;
+    LevelStorage(LevelStorage&&) = delete;
+    LevelStorage& operator=(LevelStorage&&) = delete;
+};
 
 bool requested_resolution_in_range(
     const D3D12_FEATURE_DATA_VIDEO_ENCODER_OUTPUT_RESOLUTION& r,
@@ -204,8 +210,8 @@ D3D12VideoEncodeFormatCapability QueryD3D12VideoEncodeDeviceSupport(
         return result;
     }
 
-    ProfileStorage profile = make_profile(codec, inputFormat);
-    LevelStorage levels = make_level_storage(codec);
+    ProfileStorage profile(codec, inputFormat);
+    LevelStorage levels(codec);
 
     D3D12_FEATURE_DATA_VIDEO_ENCODER_PROFILE_LEVEL profileLevel = {};
     profileLevel.NodeIndex = 0;

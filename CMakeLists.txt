@@ -16,8 +16,10 @@ set(D3DVIDEOENCODER_D3D11HELPER_DIR "" CACHE PATH "Optional path to a local D3D1
 set(D3DVIDEOENCODER_D3D12HELPER_DIR "" CACHE PATH "Optional path to a local D3D12Helper repository. If empty, FetchContent downloads it.")
 set(D3DVIDEOENCODER_D3D11HELPER_GIT_REPOSITORY "https://github.com/Isasa2357/D3D11Helper.git" CACHE STRING "D3D11Helper Git repository URL")
 set(D3DVIDEOENCODER_D3D12HELPER_GIT_REPOSITORY "https://github.com/Isasa2357/D3D12Helper.git" CACHE STRING "D3D12Helper Git repository URL")
-set(D3DVIDEOENCODER_D3D11HELPER_GIT_TAG "main" CACHE STRING "D3D11Helper Git tag/branch/commit")
-set(D3DVIDEOENCODER_D3D12HELPER_GIT_TAG "main" CACHE STRING "D3D12Helper Git tag/branch/commit")
+# D3D11Helper v1.13.0
+set(D3DVIDEOENCODER_D3D11HELPER_GIT_TAG "8711cd297f8af527c2d4701f9f522e54f29ad5b8" CACHE STRING "D3D11Helper Git tag/branch/commit")
+# D3D12Helper v1.13.0
+set(D3DVIDEOENCODER_D3D12HELPER_GIT_TAG "98e97d7b5dfa02063152549b05211d7408edc524" CACHE STRING "D3D12Helper Git tag/branch/commit")
 
 set(D3DVIDEOENCODER_D3D11_PROCESSING_SHADER_DIR "" CACHE PATH "D3D11Processing shader directory. Auto-detected from D3D11Helper when empty.")
 set(D3DVIDEOENCODER_D3D12_PROCESSING_SHADER_DIR "" CACHE PATH "D3D12Processing shader directory. Auto-detected from D3D12Helper when empty.")
@@ -58,7 +60,6 @@ if(NOT TARGET D3D11Helper::D3D11Helper)
             D3D11Helper
             GIT_REPOSITORY "${D3DVIDEOENCODER_D3D11HELPER_GIT_REPOSITORY}"
             GIT_TAG        "${D3DVIDEOENCODER_D3D11HELPER_GIT_TAG}"
-            GIT_SHALLOW    TRUE
         )
         FetchContent_MakeAvailable(D3D11Helper)
     else()
@@ -76,7 +77,6 @@ if(NOT TARGET D3D12Helper::D3D12Helper)
             D3D12Helper
             GIT_REPOSITORY "${D3DVIDEOENCODER_D3D12HELPER_GIT_REPOSITORY}"
             GIT_TAG        "${D3DVIDEOENCODER_D3D12HELPER_GIT_TAG}"
-            GIT_SHALLOW    TRUE
         )
         FetchContent_MakeAvailable(D3D12Helper)
     else()
@@ -194,13 +194,17 @@ set(D3DVIDEOENCODER_SOURCES
 if(D3DVIDEOENCODER_HAS_NVENC)
     list(APPEND D3DVIDEOENCODER_PRIVATE_HEADERS
         src/backend/nvenc/NvencCommon.hpp
+        src/backend/nvenc/NvencLifecyclePolicy.hpp
+        src/backend/nvenc/NvencD3D12OutputStrategy.hpp
         src/backend/mux/NvencOutputMuxer.hpp
+        src/backend/mux/NvencMp4DurationBoxes.hpp
         src/backend/nvenc/NvencD3D11EncoderBackend.hpp
         src/backend/nvenc/INvencD3D12EncoderBackend.hpp
         src/backend/nvenc/NvencD3D12EncoderBackend.hpp
     )
     list(APPEND D3DVIDEOENCODER_SOURCES
         src/backend/nvenc/NvencCommon.cpp
+        src/backend/nvenc/NvencD3D12OutputStrategy.cpp
         src/backend/mux/NvencOutputMuxer.cpp
         src/backend/nvenc/NvencD3D11EncoderBackend.cpp
         src/backend/nvenc/NvencD3D12EncoderBackend.cpp
@@ -212,13 +216,16 @@ if(D3DVIDEOENCODER_ENABLE_D3D12_VIDEO_ENCODE)
         src/backend/d3d12video/ID3D12VideoEncodeBackend.hpp
         src/backend/d3d12video/D3D12VideoEncodeBackend.hpp
         src/backend/d3d12video/D3D12VideoEncodeCapabilities.hpp
+        src/backend/d3d12video/D3D12VideoEncodeDiagnostic.hpp
         src/backend/d3d12video/D3D12VideoEncodeBitstreamWriter.hpp
+        src/backend/d3d12video/D3D12VideoEncodeH264ParameterSets.hpp
         src/backend/d3d12video/D3D12VideoEncodeFrameScheduler.hpp
     )
     list(APPEND D3DVIDEOENCODER_SOURCES
         src/backend/d3d12video/D3D12VideoEncodeBackend.cpp
         src/backend/d3d12video/D3D12VideoEncodeCapabilities.cpp
         src/backend/d3d12video/D3D12VideoEncodeBitstreamWriter.cpp
+        src/backend/d3d12video/D3D12VideoEncodeH264ParameterSets.cpp
     )
 endif()
 

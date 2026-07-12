@@ -33,6 +33,7 @@ public:
 private:
     void validateDesc() const;
     std::unique_ptr<IVideoEncoderBackend> createBackend();
+    void enableMultithreadProtectionIfNeeded();
 
     void encodeOrQueue(EncodeSurface surface, int64_t timestamp100ns, int64_t duration100ns);
     void encodeNow(const EncodeSurface& surface, int64_t timestamp100ns, int64_t duration100ns);

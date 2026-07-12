@@ -93,11 +93,34 @@ std::vector<uint8_t> to_length_prefixed(const std::vector<uint8_t>& annexB) {
     return out;
 }
 
+struct AvcParameterSetScan {
+    bool hasSps = false;
+    bool hasPps = false;
+    std::vector<uint8_t> sps;
+    std::vector<uint8_t> pps;
+};
+
+AvcParameterSetScan scan_avc_parameter_sets(const std::vector<uint8_t>& annexB) {
+    AvcParameterSetScan scan;
+    for (const auto& r : find_annexb_nalus(annexB)) {
+        if (r.second == 0) continue;
+        const uint8_t* nal = annexB.data() + r.first;
+        const uint8_t type = nal[0] & 0x1f;
+        if (type == 7) {
+            scan.hasSps = true;
+            scan.sps.assign(nal, nal + r.second);
+        } else if (type == 8) {
+            scan.hasPps = true;
+            scan.pps.assign(nal, nal + r.second);
+        }
+    }
+    return scan;
+}
+
 std::vector<uint8_t> make_avcc(const std::vector<uint8_t>& sps, const std::vector<uint8_t>& pps) {
     if (sps.size() < 4 || pps.empty()) {
         throw D3DVideoEncoderError(
-            "D3D12 Video Encode MP4/MKV mux requires H.264 SPS/PPS in the encoded bitstream. "
-            "If your driver does not emit SPS/PPS, use .h264 output until parameter-set injection is implemented.");
+            "D3D12 Video Encode MP4/MKV mux requires H.264 SPS/PPS from the driver bitstream or generated parameter sets.");
     }
     std::vector<uint8_t> p;
     put_u8(p, 1);
@@ -164,30 +187,30 @@ std::vector<uint8_t> make_ftyp(VideoCodec codec) {
 
 std::vector<uint8_t> make_mvhd(uint64_t duration) {
     std::vector<uint8_t> p;
-    put_u32(p, 0); put_u32(p, 0); put_u32(p, kTimeScale100ns); put_u32(p, static_cast<uint32_t>(duration));
+    put_u64(p, 0); put_u64(p, 0); put_u32(p, kTimeScale100ns); put_u64(p, duration);
     put_u32(p, 0x00010000); put_u16(p, 0x0100); put_u16(p, 0); put_u32(p, 0); put_u32(p, 0);
     const uint32_t matrix[9] = {0x00010000,0,0,0,0x00010000,0,0,0,0x40000000};
     for (uint32_t v : matrix) put_u32(p, v);
     for (int i = 0; i < 6; ++i) put_u32(p, 0);
     put_u32(p, 2);
-    return full_box("mvhd", 0, 0, p);
+    return full_box("mvhd", 1, 0, p);
 }
 
 std::vector<uint8_t> make_tkhd(uint32_t width, uint32_t height, uint64_t duration) {
     std::vector<uint8_t> p;
-    put_u32(p,0); put_u32(p,0); put_u32(p,1); put_u32(p,0); put_u32(p,static_cast<uint32_t>(duration));
+    put_u64(p,0); put_u64(p,0); put_u32(p,1); put_u32(p,0); put_u64(p,duration);
     put_u32(p,0); put_u32(p,0); put_u16(p,0); put_u16(p,0); put_u16(p,0); put_u16(p,0);
     const uint32_t matrix[9] = {0x00010000,0,0,0,0x00010000,0,0,0,0x40000000};
     for (uint32_t v : matrix) put_u32(p, v);
     put_u32(p, width << 16); put_u32(p, height << 16);
-    return full_box("tkhd", 0, 0x000007, p);
+    return full_box("tkhd", 1, 0x000007, p);
 }
 
 std::vector<uint8_t> make_mdhd(uint64_t duration) {
     std::vector<uint8_t> p;
-    put_u32(p,0); put_u32(p,0); put_u32(p,kTimeScale100ns); put_u32(p,static_cast<uint32_t>(duration));
+    put_u64(p,0); put_u64(p,0); put_u32(p,kTimeScale100ns); put_u64(p,duration);
     put_u16(p,0x55c4); put_u16(p,0);
-    return full_box("mdhd",0,0,p);
+    return full_box("mdhd",1,0,p);
 }
 
 std::vector<uint8_t> make_hdlr() {
@@ -329,7 +352,32 @@ void D3D12VideoEncodeBitstreamWriter::open(
     hevcVps_.clear();
     hevcSps_.clear();
     hevcPps_.clear();
+    generatedAvcSpsAnnexB_.clear();
+    generatedAvcPpsAnnexB_.clear();
+    generatedAvcSps_.clear();
+    generatedAvcPps_.clear();
+    h264ParameterSetsEmitted_ = false;
     opened_ = true;
+}
+
+void D3D12VideoEncodeBitstreamWriter::configureH264ParameterSets(const H264ParameterSetConfig& config) {
+    const auto sets = GenerateH264ParameterSets(config);
+    generatedAvcSpsAnnexB_ = sets.spsAnnexB;
+    generatedAvcPpsAnnexB_ = sets.ppsAnnexB;
+    generatedAvcSps_ = sets.spsNal;
+    generatedAvcPps_ = sets.ppsNal;
+    h264ParameterSetsEmitted_ = false;
+}
+
+size_t D3D12VideoEncodeBitstreamWriter::pendingBitstreamMetadataSize() const noexcept {
+    if (container_ != Container::Elementary ||
+        codec_ != VideoCodec::H264 ||
+        h264ParameterSetsEmitted_ ||
+        generatedAvcSpsAnnexB_.empty() ||
+        generatedAvcPpsAnnexB_.empty()) {
+        return 0;
+    }
+    return generatedAvcSpsAnnexB_.size() + generatedAvcPpsAnnexB_.size();
 }
 
 void D3D12VideoEncodeBitstreamWriter::writeElementary(const uint8_t* data, size_t size) {
@@ -338,6 +386,25 @@ void D3D12VideoEncodeBitstreamWriter::writeElementary(const uint8_t* data, size_
         throw D3DVideoEncoderError("Failed to write D3D12 Video Encode elementary stream output file.");
     }
     bytesWritten_ += static_cast<uint64_t>(size);
+}
+
+void D3D12VideoEncodeBitstreamWriter::writeElementaryH264(const uint8_t* data, size_t size) {
+    if (!h264ParameterSetsEmitted_) {
+        const std::vector<uint8_t> firstAccessUnit(data, data + size);
+        const auto scan = scan_avc_parameter_sets(firstAccessUnit);
+        if (scan.hasSps && scan.hasPps) {
+            avcSps_ = scan.sps;
+            avcPps_ = scan.pps;
+            h264ParameterSetsEmitted_ = true;
+        } else if (!generatedAvcSpsAnnexB_.empty() && !generatedAvcPpsAnnexB_.empty()) {
+            avcSps_ = generatedAvcSps_;
+            avcPps_ = generatedAvcPps_;
+            writeElementary(generatedAvcSpsAnnexB_.data(), generatedAvcSpsAnnexB_.size());
+            writeElementary(generatedAvcPpsAnnexB_.data(), generatedAvcPpsAnnexB_.size());
+            h264ParameterSetsEmitted_ = true;
+        }
+    }
+    writeElementary(data, size);
 }
 
 void D3D12VideoEncodeBitstreamWriter::parseParameterSetsAndSample(Sample& sample) {
@@ -359,6 +426,10 @@ void D3D12VideoEncodeBitstreamWriter::parseParameterSetsAndSample(Sample& sample
             else if (type >= 16 && type <= 21) sample.keyFrame = true;
         }
     }
+    if (codec_ == VideoCodec::H264) {
+        if (avcSps_.empty() && !generatedAvcSps_.empty()) avcSps_ = generatedAvcSps_;
+        if (avcPps_.empty() && !generatedAvcPps_.empty()) avcPps_ = generatedAvcPps_;
+    }
 }
 
 void D3D12VideoEncodeBitstreamWriter::writeAccessUnit(
@@ -378,7 +449,11 @@ void D3D12VideoEncodeBitstreamWriter::writeAccessUnit(
     }
 
     if (container_ == Container::Elementary) {
-        writeElementary(data, size);
+        if (codec_ == VideoCodec::H264) {
+            writeElementaryH264(data, size);
+        } else {
+            writeElementary(data, size);
+        }
         return;
     }
 

@@ -2,16 +2,22 @@
 
 #include <D3DVideoEncoder/D3DVideoEncoderError.hpp>
 
+#include "backend/d3d12video/D3D12VideoEncodeH264ParameterSets.hpp"
+
 #include <d3d12video.h>
 #include <Windows.h>
-#include <D3D12Helper/D3D12Core/D3D12Barrier.hpp>
+#include <D3D12Helper/D3D12Core/D3D12BarrierBatch.hpp>
 #include <D3D12Helper/D3D12Framework/D3D12Helpers.hpp>
-#include <wrl/client.h>
+#include <D3D12Helper/D3D12Gpu/D3D12ResourceCreate.hpp>
+#include <D3D12Helper/D3D12Gpu/D3D12ResourceValidation.hpp>
+#include <D3D12Helper/D3D12Gpu/D3D12ResourceView.hpp>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -19,7 +25,8 @@
 namespace D3DVideoEncoderLib {
 namespace {
 
-using Microsoft::WRL::ComPtr;
+constexpr UCHAR kH264Log2MaxFrameNumMinus4 = 12;
+constexpr UCHAR kH264Log2MaxPicOrderCntLsbMinus4 = 12;
 
 std::string hr_hex(HRESULT hr) {
     std::ostringstream os;
@@ -66,6 +73,67 @@ std::string FormatDxgi(DXGI_FORMAT format) {
     return oss.str();
 }
 
+std::string FormatResourceState(D3D12_RESOURCE_STATES state) {
+    switch (state) {
+    case D3D12_RESOURCE_STATE_COMMON: return "COMMON";
+    case D3D12_RESOURCE_STATE_COPY_SOURCE: return "COPY_SOURCE";
+    case D3D12_RESOURCE_STATE_COPY_DEST: return "COPY_DEST";
+    case D3D12_RESOURCE_STATE_RENDER_TARGET: return "RENDER_TARGET";
+    case D3D12_RESOURCE_STATE_UNORDERED_ACCESS: return "UNORDERED_ACCESS";
+    case D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ: return "VIDEO_ENCODE_READ";
+    case D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE: return "VIDEO_ENCODE_WRITE";
+    default: {
+        std::ostringstream oss;
+        oss << "0x" << std::hex << std::uppercase << static_cast<unsigned long>(state);
+        return oss.str();
+    }
+    }
+}
+
+std::string FormatResourceStateHex(D3D12_RESOURCE_STATES state) {
+    std::ostringstream oss;
+    oss << "0x" << std::hex << std::uppercase << static_cast<unsigned long>(state);
+    return oss.str();
+}
+
+std::string FormatResourcePointer(ID3D12Resource* resource) {
+    std::ostringstream oss;
+    oss << "0x" << std::hex << std::uppercase << reinterpret_cast<std::uintptr_t>(resource);
+    return oss.str();
+}
+
+bool ShouldTraceFrame(uint64_t frameIndex) noexcept {
+    return frameIndex < 3;
+}
+
+std::string FormatFenceProgress(const char* label, const D3D12CoreLib::D3D12QueueSyncPoint& point) {
+    std::ostringstream oss;
+    oss << label
+        << " value=" << point.GetValue()
+        << " completed=" << (point.GetFence() ? point.GetFence()->GetCompletedValue() : 0);
+    return oss.str();
+}
+
+std::string FormatTransitionDiagnostic(
+    const char* commandListType,
+    uint64_t frameIndex,
+    const char* logicalName,
+    ID3D12Resource* resource,
+    D3D12_RESOURCE_STATES before,
+    D3D12_RESOURCE_STATES after) {
+
+    std::ostringstream oss;
+    oss << "Barrier frame=" << frameIndex
+        << " commandList=" << commandListType
+        << " resource=" << (logicalName ? logicalName : "(unnamed)")
+        << " ptr=" << FormatResourcePointer(resource)
+        << " before=" << FormatResourceState(before)
+        << "(" << FormatResourceStateHex(before) << ")"
+        << " after=" << FormatResourceState(after)
+        << "(" << FormatResourceStateHex(after) << ")";
+    return oss.str();
+}
+
 bool RectEqualsFull(const D3D12CoreLib::Processing::ProcessingRect& r, UINT width, UINT height) noexcept {
     return r.x == 0 && r.y == 0 && r.width == width && r.height == height;
 }
@@ -75,61 +143,54 @@ uint64_t align_up_u64(uint64_t value, uint64_t alignment) noexcept {
     return ((value + alignment - 1) / alignment) * alignment;
 }
 
-D3D12_HEAP_PROPERTIES heap_properties(D3D12_HEAP_TYPE type) noexcept {
-    D3D12_HEAP_PROPERTIES props = {};
-    props.Type = type;
-    props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-    props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-    props.CreationNodeMask = 1;
-    props.VisibleNodeMask = 1;
-    return props;
+uint8_t h264_level_idc(D3D12_VIDEO_ENCODER_LEVELS_H264 level) noexcept {
+    switch (level) {
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_1: return 10;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_1b: return 9;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_11: return 11;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_12: return 12;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_13: return 13;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_2: return 20;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_21: return 21;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_22: return 22;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_3: return 30;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_31: return 31;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_32: return 32;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_4: return 40;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_41: return 41;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_42: return 42;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_5: return 50;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_51: return 51;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_52: return 52;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_6: return 60;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_61: return 61;
+    case D3D12_VIDEO_ENCODER_LEVELS_H264_62: return 62;
+    default: return 52;
+    }
 }
 
-D3D12_RESOURCE_DESC buffer_desc(uint64_t size) noexcept {
-    D3D12_RESOURCE_DESC desc = {};
-    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    desc.Alignment = 0;
-    desc.Width = size;
-    desc.Height = 1;
-    desc.DepthOrArraySize = 1;
-    desc.MipLevels = 1;
-    desc.Format = DXGI_FORMAT_UNKNOWN;
-    desc.SampleDesc.Count = 1;
-    desc.SampleDesc.Quality = 0;
-    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-    return desc;
-}
-
-D3D12_RESOURCE_DESC encode_texture_desc(uint32_t width, uint32_t height, DXGI_FORMAT format) noexcept {
-    D3D12_RESOURCE_DESC desc = {};
-    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    desc.Alignment = 0;
-    desc.Width = width;
-    desc.Height = height;
-    desc.DepthOrArraySize = 1;
-    desc.MipLevels = 1;
-    desc.Format = format;
-    desc.SampleDesc.Count = 1;
-    desc.SampleDesc.Quality = 0;
-    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-    return desc;
-}
-
-D3D12_RESOURCE_BARRIER transition_barrier(
-    ID3D12Resource* resource,
-    D3D12_RESOURCE_STATES before,
-    D3D12_RESOURCE_STATES after) noexcept {
-
-    D3D12_RESOURCE_BARRIER barrier = {};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    barrier.Transition.pResource = resource;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barrier.Transition.StateBefore = before;
-    barrier.Transition.StateAfter = after;
-    return barrier;
+H264ParameterSetConfig make_h264_parameter_set_config(const D3D12VideoEncoderDesc& desc) {
+    H264ParameterSetConfig config;
+    config.width = desc.width;
+    config.height = desc.height;
+    config.profileIdc = 100;
+    config.constraintFlags = 0;
+    config.levelIdc = h264_level_idc(D3D12_VIDEO_ENCODER_LEVELS_H264_52);
+    config.seqParameterSetId = 0;
+    config.picParameterSetId = 0;
+    config.chromaFormatIdc = 1;
+    config.bitDepthLumaMinus8 = 0;
+    config.bitDepthChromaMinus8 = 0;
+    config.log2MaxFrameNumMinus4 = kH264Log2MaxFrameNumMinus4;
+    config.picOrderCntType = 0;
+    config.log2MaxPicOrderCntLsbMinus4 = kH264Log2MaxPicOrderCntLsbMinus4;
+    config.maxNumRefFrames = 2;
+    config.entropyCodingModeFlag = false;
+    config.bottomFieldPicOrderInFramePresentFlag = false;
+    config.deblockingFilterControlPresentFlag = true;
+    config.constrainedIntraPredFlag = false;
+    config.transform8x8ModeFlag = false;
+    return config;
 }
 
 struct CodecProfileStorage {
@@ -214,8 +275,8 @@ struct CodecGopStorage {
             h264.GOPLength = gop;
             h264.PPicturePeriod = 1;
             h264.pic_order_cnt_type = 0;
-            h264.log2_max_frame_num_minus4 = 4;
-            h264.log2_max_pic_order_cnt_lsb_minus4 = 4;
+            h264.log2_max_frame_num_minus4 = kH264Log2MaxFrameNumMinus4;
+            h264.log2_max_pic_order_cnt_lsb_minus4 = kH264Log2MaxPicOrderCntLsbMinus4;
             desc.DataSize = sizeof(h264);
             desc.pH264GroupOfPictures = &h264;
         }
@@ -256,6 +317,62 @@ struct RateControlStorage {
 bool is_idr_frame(uint64_t frameIndex, uint32_t gopLength) noexcept {
     const uint32_t gop = std::max<uint32_t>(gopLength, 1);
     return (frameIndex % gop) == 0;
+}
+
+uint32_t next_h264_idr_pic_id(uint32_t current) noexcept {
+    constexpr uint32_t kMaxIdrPicId = 65535;
+    return (current >= kMaxIdrPicId) ? 0 : (current + 1);
+}
+
+D3D12CoreLib::D3D12Resource create_buffer(
+    D3D12CoreLib::D3D12Core& core,
+    uint64_t sizeBytes,
+    D3D12_RESOURCE_STATES initialState,
+    const char* label) {
+
+    D3D12CoreLib::D3D12BufferCreateDesc desc = {};
+    desc.sizeBytes = sizeBytes;
+    desc.initialState = initialState;
+
+    try {
+        return D3D12CoreLib::CreateBufferDetailed(core, desc);
+    } catch (const std::exception& e) {
+        throw D3DVideoEncoderError(std::string(label) + " failed: " + e.what());
+    }
+}
+
+D3D12CoreLib::D3D12Resource create_encode_texture(
+    D3D12CoreLib::D3D12Core& core,
+    uint32_t width,
+    uint32_t height,
+    DXGI_FORMAT format,
+    D3D12_RESOURCE_STATES initialState,
+    const char* label) {
+
+    D3D12CoreLib::D3D12Texture2DCreateDesc desc = {};
+    desc.width = width;
+    desc.height = height;
+    desc.format = format;
+    desc.initialState = initialState;
+
+    try {
+        return D3D12CoreLib::CreateTexture2DDetailed(core, desc);
+    } catch (const std::exception& e) {
+        throw D3DVideoEncoderError(std::string(label) + " failed: " + e.what());
+    }
+}
+
+void initialize_readback(
+    D3D12CoreLib::D3D12ReadbackBuffer& readback,
+    ID3D12Device* device,
+    uint64_t sizeBytes,
+    const char* label) {
+
+    try {
+        readback.Initialize(device, sizeBytes);
+    } catch (const std::exception& e) {
+        throw D3DVideoEncoderError(std::string(label) + " failed: " + e.what());
+    }
 }
 
 } // namespace
@@ -326,6 +443,12 @@ D3D12CoreLib::Processing::ProcessingFilter D3D12VideoEncodeBackend::processingFi
 
 void D3D12VideoEncodeBackend::initialize(const D3D12VideoEncoderDesc& desc) {
     desc_ = desc;
+    frameIndex_ = 0;
+    hasReferenceFrame_ = false;
+    h264CurrentGopStartFrame_ = 0;
+    h264NextIdrPicId_ = 0;
+    h264PreviousReferenceDecodingOrder_ = 0;
+    h264PreviousReferencePoc_ = 0;
     validateDesc();
     queryVideoDevice();
     queryEncodeSupport();
@@ -337,8 +460,10 @@ void D3D12VideoEncodeBackend::initialize(const D3D12VideoEncoderDesc& desc) {
     createQueuesAndCommands();
     createBuffers();
     createReconstructedPictures();
-    createFences();
     writer_.open(desc_.outputPath, desc_.width, desc_.height, desc_.frameRateNum, desc_.frameRateDen, desc_.codec);
+    if (desc_.codec == VideoCodec::H264) {
+        writer_.configureH264ParameterSets(make_h264_parameter_set_config(desc_));
+    }
 
     open_ = true;
     log_.info(useProcessing_
@@ -434,6 +559,8 @@ void D3D12VideoEncodeBackend::queryEncodeSupport() {
     }
 
     CodecProfileStorage profile(desc_.codec, desc_.internalFormat);
+    CodecProfileStorage suggestedProfile(desc_.codec, desc_.internalFormat);
+    CodecLevelStorage suggestedLevel(desc_.codec);
     CodecConfigStorage codecConfig(desc_.codec);
     CodecGopStorage gop(desc_.codec, desc_.gopLength);
     RateControlStorage rateControl(desc_, capability_.cbrSupported);
@@ -452,6 +579,8 @@ void D3D12VideoEncodeBackend::queryEncodeSupport() {
     support.ResolutionsListCount = 1;
     support.pResolutionList = &resolution;
     support.MaxReferenceFramesInDPB = 1;
+    support.SuggestedProfile = suggestedProfile.desc;
+    support.SuggestedLevel = suggestedLevel.desc;
     support.pResolutionDependentSupport = &resolutionLimits;
 
     const HRESULT hr = videoDevice_->CheckFeatureSupport(
@@ -531,53 +660,51 @@ void D3D12VideoEncodeBackend::createEncoderObjects() {
 void D3D12VideoEncodeBackend::createQueuesAndCommands() {
     ID3D12Device* device = desc_.input.core->GetDevice();
 
-    D3D12_COMMAND_QUEUE_DESC videoQueueDesc = {};
-    videoQueueDesc.Type = D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE;
-    videoQueueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
-    videoQueueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-    videoQueueDesc.NodeMask = 0;
-    throw_hr(device->CreateCommandQueue(&videoQueueDesc, IID_PPV_ARGS(&videoQueue_)), "CreateCommandQueue(VIDEO_ENCODE)");
+    try {
+        videoQueue_.Initialize(device, D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE);
+        videoAllocator_.Initialize(device, D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE);
+        videoCommandList_ = D3D12CoreLib::CreateTypedCommandList<ID3D12VideoEncodeCommandList2>(
+            device,
+            D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE,
+            videoAllocator_);
+        throw_hr(videoCommandList_->Close(), "Close initial video encode command list");
 
-    throw_hr(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE, IID_PPV_ARGS(&videoAllocator_)), "CreateCommandAllocator(VIDEO_ENCODE)");
-    throw_hr(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE, videoAllocator_.Get(), nullptr, IID_PPV_ARGS(&videoCommandList_)), "CreateCommandList(VIDEO_ENCODE)");
-    throw_hr(videoCommandList_->Close(), "Close initial video encode command list");
-
-    throw_hr(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&copyAllocator_)), "CreateCommandAllocator(DIRECT copy)");
-    throw_hr(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, copyAllocator_.Get(), nullptr, IID_PPV_ARGS(&copyCommandList_)), "CreateCommandList(DIRECT copy)");
-    throw_hr(copyCommandList_->Close(), "Close initial copy command list");
-}
-
-void D3D12VideoEncodeBackend::createBuffers() {
-    ID3D12Device* device = desc_.input.core->GetDevice();
-
-    const auto defaultHeap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
-    const auto readbackHeap = heap_properties(D3D12_HEAP_TYPE_READBACK);
-
-    auto bitstreamDesc = buffer_desc(bitstreamBufferSize_);
-    throw_hr(device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &bitstreamDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&bitstreamBuffer_)), "Create bitstream buffer");
-    throw_hr(device->CreateCommittedResource(&readbackHeap, D3D12_HEAP_FLAG_NONE, &bitstreamDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&bitstreamReadback_)), "Create bitstream readback buffer");
-
-    auto encoderMetadataDesc = buffer_desc(encoderMetadataBufferSize_);
-    throw_hr(device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &encoderMetadataDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&encoderMetadataBuffer_)), "Create encoder metadata buffer");
-
-    auto resolvedMetadataDesc = buffer_desc(resolvedMetadataBufferSize_);
-    throw_hr(device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &resolvedMetadataDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&resolvedMetadataBuffer_)), "Create resolved metadata buffer");
-    throw_hr(device->CreateCommittedResource(&readbackHeap, D3D12_HEAP_FLAG_NONE, &resolvedMetadataDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&resolvedMetadataReadback_)), "Create resolved metadata readback buffer");
-}
-
-void D3D12VideoEncodeBackend::createReconstructedPictures() {
-    ID3D12Device* device = desc_.input.core->GetDevice();
-    const auto defaultHeap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
-    const auto textureDesc = encode_texture_desc(desc_.width, desc_.height, ToDxgiFormat(desc_.internalFormat));
-    for (auto& recon : reconstructedPictures_) {
-        throw_hr(device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &textureDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&recon)), "Create reconstructed encode-format texture");
+        copyAllocator_.Initialize(device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+        copyCommandList_ = D3D12CoreLib::CreateTypedCommandList<ID3D12GraphicsCommandList>(
+            device,
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            copyAllocator_);
+        throw_hr(copyCommandList_->Close(), "Close initial copy command list");
+    } catch (const D3DVideoEncoderError&) {
+        throw;
+    } catch (const std::exception& e) {
+        throw D3DVideoEncoderError(std::string("Create D3D12 Video Encode queues/command lists failed: ") + e.what());
     }
 }
 
-void D3D12VideoEncodeBackend::createFences() {
-    ID3D12Device* device = desc_.input.core->GetDevice();
-    throw_hr(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&videoFence_)), "Create video fence");
-    throw_hr(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&copyFence_)), "Create copy fence");
+void D3D12VideoEncodeBackend::createBuffers() {
+    auto& core = *desc_.input.core;
+    ID3D12Device* device = core.GetDevice();
+
+    bitstreamBuffer_ = create_buffer(core, bitstreamBufferSize_, D3D12_RESOURCE_STATE_COMMON, "Create bitstream buffer");
+    initialize_readback(bitstreamReadback_, device, bitstreamBufferSize_, "Create bitstream readback buffer");
+
+    encoderMetadataBuffer_ = create_buffer(core, encoderMetadataBufferSize_, D3D12_RESOURCE_STATE_COMMON, "Create encoder metadata buffer");
+    resolvedMetadataBuffer_ = create_buffer(core, resolvedMetadataBufferSize_, D3D12_RESOURCE_STATE_COMMON, "Create resolved metadata buffer");
+    initialize_readback(resolvedMetadataReadback_, device, resolvedMetadataBufferSize_, "Create resolved metadata readback buffer");
+}
+
+void D3D12VideoEncodeBackend::createReconstructedPictures() {
+    auto& core = *desc_.input.core;
+    for (auto& recon : reconstructedPictures_) {
+        recon = create_encode_texture(
+            core,
+            desc_.width,
+            desc_.height,
+            ToDxgiFormat(desc_.internalFormat),
+            D3D12_RESOURCE_STATE_COMMON,
+            "Create reconstructed encode-format texture");
+    }
 }
 
 void D3D12VideoEncodeBackend::initializeProcessingIfNeeded() {
@@ -631,24 +758,19 @@ void D3D12VideoEncodeBackend::validateInputResource(ID3D12Resource* resource) co
         throw D3DVideoEncoderError("D3D12VideoEncodeBackend encode received a null ID3D12Resource.");
     }
 
-    const D3D12_RESOURCE_DESC rd = resource->GetDesc();
-    if (rd.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-        rd.Width != sourceWidth() ||
-        rd.Height != sourceHeight() ||
-        rd.Format != desc_.input.inputFormat) {
-        std::ostringstream oss;
-        oss << "D3D12VideoEncodeBackend input resource mismatch. expected="
-            << sourceWidth() << "x" << sourceHeight()
-            << " inputFormat=" << FormatDxgi(desc_.input.inputFormat)
-            << " actual=" << static_cast<uint64_t>(rd.Width) << "x" << rd.Height
-            << " format=" << FormatDxgi(rd.Format);
-        throw D3DVideoEncoderError(oss.str());
-    }
+    D3D12CoreLib::D3D12Texture2DRequirement requirement = {};
+    requirement.width = sourceWidth();
+    requirement.height = sourceHeight();
+    requirement.format = desc_.input.inputFormat;
+    requirement.expectedDevice = desc_.input.core->GetDevice();
 
-    Microsoft::WRL::ComPtr<ID3D12Device> resourceDevice;
-    resource->GetDevice(IID_PPV_ARGS(&resourceDevice));
-    if (resourceDevice.Get() != desc_.input.core->GetDevice()) {
-        throw D3DVideoEncoderError("D3D12VideoEncodeBackend input resource belongs to a different ID3D12Device than desc.input.core.");
+    const auto validation = D3D12CoreLib::ValidateTexture2DView(
+        D3D12CoreLib::D3D12ResourceView(resource),
+        requirement);
+    if (!validation) {
+        std::ostringstream oss;
+        oss << "D3D12VideoEncodeBackend input resource validation failed: " << validation.Message();
+        throw D3DVideoEncoderError(oss.str());
     }
 }
 
@@ -664,12 +786,9 @@ ID3D12Resource* D3D12VideoEncodeBackend::convertToInternalFormat(ID3D12Resource*
     cbvSrvUavAllocator_.Reset();
     samplerAllocator_.Reset();
 
-    Microsoft::WRL::ComPtr<ID3D12Resource> srcComPtr;
-    srcComPtr = resource;
-    D3D12CoreLib::D3D12Resource src(std::move(srcComPtr), currentState);
-
     const auto srcRect = resolvedSourceRect();
-    D3D12CoreLib::D3D12Resource* convertSource = &src;
+    D3D12CoreLib::D3D12ResourceView srcView(resource);
+    D3D12CoreLib::D3D12ResourceView convertSource = srcView;
     DXGI_FORMAT convertSourceFormat = desc_.input.inputFormat;
     D3D12_RESOURCE_STATES convertSourceState = currentState;
 
@@ -694,10 +813,15 @@ ID3D12Resource* D3D12VideoEncodeBackend::convertToInternalFormat(ID3D12Resource*
         yuvToRgba.filter = processingFilter();
         yuvToRgba.srcRect = srcRect;
         yuvToRgba.dstRect = { 0, 0, desc_.width, desc_.height };
-        fusedProcessor_.RecordConvertResize(processingCommandContext_, src, yuvToRgbaTexture_, yuvToRgba, yuvToRgbaStates);
+        fusedProcessor_.RecordConvertResizeView(
+            processingCommandContext_,
+            srcView,
+            D3D12CoreLib::D3D12ResourceView(yuvToRgbaTexture_),
+            yuvToRgba,
+            yuvToRgbaStates);
 
         yuvToRgbaTextureState_ = D3D12_RESOURCE_STATE_COMMON;
-        convertSource = &yuvToRgbaTexture_;
+        convertSource = D3D12CoreLib::D3D12ResourceView(yuvToRgbaTexture_);
         convertSourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
         convertSourceState = D3D12_RESOURCE_STATE_COMMON;
     } else if (needsResizeOrCrop()) {
@@ -720,17 +844,27 @@ ID3D12Resource* D3D12VideoEncodeBackend::convertToInternalFormat(ID3D12Resource*
             fused.filter = processingFilter();
             fused.srcRect = srcRect;
             fused.dstRect = { 0, 0, desc_.width, desc_.height };
-            fusedProcessor_.RecordConvertResize(processingCommandContext_, src, resizedTexture_, fused, resizeStates);
+            fusedProcessor_.RecordConvertResizeView(
+                processingCommandContext_,
+                srcView,
+                D3D12CoreLib::D3D12ResourceView(resizedTexture_),
+                fused,
+                resizeStates);
         } else {
             D3D12CoreLib::Processing::ResizeDesc resize = {};
             resize.filter = processingFilter();
             resize.srcRect = srcRect;
             resize.dstRect = { 0, 0, desc_.width, desc_.height };
-            resizer_.RecordResize(processingCommandContext_, src, resizedTexture_, resize, resizeStates);
+            resizer_.RecordResizeView(
+                processingCommandContext_,
+                srcView,
+                D3D12CoreLib::D3D12ResourceView(resizedTexture_),
+                resize,
+                resizeStates);
         }
 
         resizedTextureState_ = D3D12_RESOURCE_STATE_COMMON;
-        convertSource = &resizedTexture_;
+        convertSource = D3D12CoreLib::D3D12ResourceView(resizedTexture_);
         convertSourceFormat = desc_.input.inputFormat;
         convertSourceState = D3D12_RESOURCE_STATE_COMMON;
     }
@@ -753,7 +887,12 @@ ID3D12Resource* D3D12VideoEncodeBackend::convertToInternalFormat(ID3D12Resource*
     convertStates.dstBefore = convertedTextureState_;
     convertStates.dstAfter = D3D12_RESOURCE_STATE_COMMON;
 
-    formatConverter_.RecordConvert(processingCommandContext_, *convertSource, convertedTexture_, convert, convertStates);
+    formatConverter_.RecordConvertView(
+        processingCommandContext_,
+        convertSource,
+        D3D12CoreLib::D3D12ResourceView(convertedTexture_),
+        convert,
+        convertStates);
     processingCommandContext_.Close();
 
     ID3D12CommandList* lists[] = { processingCommandContext_.GetCommandList() };
@@ -766,31 +905,162 @@ ID3D12Resource* D3D12VideoEncodeBackend::convertToInternalFormat(ID3D12Resource*
     return convertedTexture_.Get();
 }
 
-void D3D12VideoEncodeBackend::transitionVideo(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+void D3D12VideoEncodeBackend::transitionVideo(const char* logicalName, ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
     if (!resource || before == after) return;
-    const auto barrier = transition_barrier(resource, before, after);
-    videoCommandList_->ResourceBarrier(1, &barrier);
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream oss;
+        oss << "Stage frame=" << frameIndex_
+            << " commandList=VIDEO_ENCODE"
+            << " before BarrierBatch construction"
+            << " resource=" << (logicalName ? logicalName : "(unnamed)")
+            << " ptr=" << FormatResourcePointer(resource)
+            << " before=" << FormatResourceState(before) << "(" << FormatResourceStateHex(before) << ")"
+            << " after=" << FormatResourceState(after) << "(" << FormatResourceStateHex(after) << ")";
+        log_.info(oss.str());
+    }
+    D3D12CoreLib::D3D12BarrierBatch barriers;
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream oss;
+        oss << "Stage frame=" << frameIndex_
+            << " commandList=VIDEO_ENCODE"
+            << " after BarrierBatch construction"
+            << " resource=" << (logicalName ? logicalName : "(unnamed)");
+        log_.info(oss.str());
+    }
+    if (barriers.Transition(resource, before, after)) {
+        if (ShouldTraceFrame(frameIndex_)) {
+            log_.info(FormatTransitionDiagnostic("VIDEO_ENCODE", frameIndex_, logicalName, resource, before, after));
+            std::ostringstream beforeRecord;
+            beforeRecord << "Stage frame=" << frameIndex_
+                         << " commandList=VIDEO_ENCODE"
+                         << " before ResourceBarrier recording"
+                         << " resource=" << (logicalName ? logicalName : "(unnamed)")
+                         << " count=" << barriers.Count();
+            log_.info(beforeRecord.str());
+        }
+        videoCommandList_->ResourceBarrier(barriers.Count(), barriers.Data());
+        if (ShouldTraceFrame(frameIndex_)) {
+            std::ostringstream afterRecord;
+            afterRecord << "Stage frame=" << frameIndex_
+                        << " commandList=VIDEO_ENCODE"
+                        << " after ResourceBarrier recording"
+                        << " resource=" << (logicalName ? logicalName : "(unnamed)");
+            log_.info(afterRecord.str());
+        }
+    }
 }
 
-void D3D12VideoEncodeBackend::transitionCopy(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
-    if (!resource || before == after) return;
-    const auto barrier = transition_barrier(resource, before, after);
-    copyCommandList_->ResourceBarrier(1, &barrier);
+bool D3D12VideoEncodeBackend::transitionCopy(const char* logicalName, ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+    if (!resource || before == after) return false;
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream oss;
+        oss << "Stage frame=" << frameIndex_
+            << " commandList=DIRECT"
+            << " before BarrierBatch construction"
+            << " resource=" << (logicalName ? logicalName : "(unnamed)")
+            << " ptr=" << FormatResourcePointer(resource)
+            << " before=" << FormatResourceState(before) << "(" << FormatResourceStateHex(before) << ")"
+            << " after=" << FormatResourceState(after) << "(" << FormatResourceStateHex(after) << ")";
+        log_.info(oss.str());
+    }
+    D3D12CoreLib::D3D12BarrierBatch barriers;
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream oss;
+        oss << "Stage frame=" << frameIndex_
+            << " commandList=DIRECT"
+            << " after BarrierBatch construction"
+            << " resource=" << (logicalName ? logicalName : "(unnamed)");
+        log_.info(oss.str());
+    }
+    if (barriers.Transition(resource, before, after)) {
+        if (ShouldTraceFrame(frameIndex_)) {
+            log_.info(FormatTransitionDiagnostic("DIRECT", frameIndex_, logicalName, resource, before, after));
+            std::ostringstream beforeRecord;
+            beforeRecord << "Stage frame=" << frameIndex_
+                         << " commandList=DIRECT"
+                         << " before ResourceBarrier recording"
+                         << " resource=" << (logicalName ? logicalName : "(unnamed)")
+                         << " count=" << barriers.Count();
+            log_.info(beforeRecord.str());
+        }
+        copyCommandList_->ResourceBarrier(barriers.Count(), barriers.Data());
+        if (ShouldTraceFrame(frameIndex_)) {
+            std::ostringstream afterRecord;
+            afterRecord << "Stage frame=" << frameIndex_
+                        << " commandList=DIRECT"
+                        << " after ResourceBarrier recording"
+                        << " resource=" << (logicalName ? logicalName : "(unnamed)");
+            log_.info(afterRecord.str());
+        }
+        return true;
+    }
+    return false;
 }
 
 void D3D12VideoEncodeBackend::recordEncodeFrame(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState, bool restoreInputState) {
     const bool idr = is_idr_frame(frameIndex_, desc_.gopLength) || !hasReferenceFrame_;
+    if (desc_.codec == VideoCodec::H264 && idr) {
+        h264CurrentGopStartFrame_ = frameIndex_;
+    }
+    const uint64_t h264FrameOffset = frameIndex_ - h264CurrentGopStartFrame_;
+    const uint32_t h264FrameInGop = static_cast<uint32_t>(std::min<uint64_t>(h264FrameOffset, UINT32_MAX));
+    const uint32_t h264CurrentDecodingOrder = idr ? 0u : h264FrameInGop;
+    const uint32_t h264CurrentPoc = idr ? 0u : h264FrameInGop;
+    const uint32_t h264CurrentIdrPicId = h264NextIdrPicId_;
+    const uint32_t h264ReferenceDecodingOrder = h264PreviousReferenceDecodingOrder_;
+    const uint32_t h264ReferencePoc = h264PreviousReferencePoc_;
+
     currentReconIndex_ = static_cast<uint32_t>(frameIndex_ % reconstructedPictures_.size());
     previousReconIndex_ = static_cast<uint32_t>((frameIndex_ + reconstructedPictures_.size() - 1) % reconstructedPictures_.size());
+    const UINT referenceCount = (!idr && hasReferenceFrame_) ? 1u : 0u;
 
-    transitionVideo(resource, currentState, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ);
-    transitionVideo(bitstreamBuffer_.Get(), bitstreamState_, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
-    transitionVideo(encoderMetadataBuffer_.Get(), encoderMetadataState_, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
-    transitionVideo(resolvedMetadataBuffer_.Get(), resolvedMetadataState_, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
-    transitionVideo(reconstructedPictures_[currentReconIndex_].Get(), reconstructedStates_[currentReconIndex_], D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream oss;
+        oss << "FrameDiagnostic frame=" << frameIndex_
+            << " type=" << (idr ? "IDR" : "P")
+            << " idr=" << (idr ? "true" : "false")
+            << " appFrameIndex=" << frameIndex_
+            << " frameInGop=" << h264FrameInGop
+            << " frame_num=" << h264CurrentDecodingOrder
+            << " poc=" << h264CurrentPoc
+            << " idr_pic_id=" << h264CurrentIdrPicId
+            << " previousReferenceFrameNum=" << h264ReferenceDecodingOrder
+            << " previousReferencePoc=" << h264ReferencePoc
+            << " currentReconIndex=" << currentReconIndex_
+            << " previousReconIndex=" << previousReconIndex_
+            << " referenceCount=" << referenceCount
+            << " input=" << FormatResourcePointer(resource)
+            << " bitstream=" << FormatResourcePointer(bitstreamBuffer_.Get())
+            << " encoderMetadata=" << FormatResourcePointer(encoderMetadataBuffer_.Get())
+            << " resolvedMetadata=" << FormatResourcePointer(resolvedMetadataBuffer_.Get())
+            << " currentRecon=" << FormatResourcePointer(reconstructedPictures_[currentReconIndex_].Get())
+            << " previousRecon=" << FormatResourcePointer(reconstructedPictures_[previousReconIndex_].Get())
+            << " currentEqualsPrevious="
+            << ((reconstructedPictures_[currentReconIndex_].Get() == reconstructedPictures_[previousReconIndex_].Get()) ? "yes" : "no")
+            << " inputSubresource=0"
+            << " reconSubresource=0"
+            << " refSubresource=0";
+        log_.info(oss.str());
+
+        std::ostringstream states;
+        states << "FrameStateBeforeBarriers frame=" << frameIndex_
+               << " input=" << FormatResourceState(currentState) << "(" << FormatResourceStateHex(currentState) << ")"
+               << " bitstream=" << FormatResourceState(bitstreamState_) << "(" << FormatResourceStateHex(bitstreamState_) << ")"
+               << " encoderMetadata=" << FormatResourceState(encoderMetadataState_) << "(" << FormatResourceStateHex(encoderMetadataState_) << ")"
+               << " resolvedMetadata=" << FormatResourceState(resolvedMetadataState_) << "(" << FormatResourceStateHex(resolvedMetadataState_) << ")"
+               << " currentRecon=" << FormatResourceState(reconstructedStates_[currentReconIndex_]) << "(" << FormatResourceStateHex(reconstructedStates_[currentReconIndex_]) << ")"
+               << " previousRecon=" << FormatResourceState(reconstructedStates_[previousReconIndex_]) << "(" << FormatResourceStateHex(reconstructedStates_[previousReconIndex_]) << ")";
+        log_.info(states.str());
+    }
+
+    transitionVideo("input texture", resource, currentState, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ);
+    transitionVideo("bitstream buffer", bitstreamBuffer_.Get(), bitstreamState_, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
+    transitionVideo("encoder metadata buffer", encoderMetadataBuffer_.Get(), encoderMetadataState_, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
+    transitionVideo("resolved metadata buffer", resolvedMetadataBuffer_.Get(), resolvedMetadataState_, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
+    transitionVideo("current reconstructed texture", reconstructedPictures_[currentReconIndex_].Get(), reconstructedStates_[currentReconIndex_], D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
 
     if (!idr && hasReferenceFrame_) {
-        transitionVideo(reconstructedPictures_[previousReconIndex_].Get(), reconstructedStates_[previousReconIndex_], D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ);
+        transitionVideo("previous reconstructed texture", reconstructedPictures_[previousReconIndex_].Get(), reconstructedStates_[previousReconIndex_], D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ);
         reconstructedStates_[previousReconIndex_] = D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ;
     }
 
@@ -837,17 +1107,17 @@ void D3D12VideoEncodeBackend::recordEncodeFrame(ID3D12Resource* resource, D3D12_
         h264Pic.Flags = D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_H264_FLAG_NONE;
         h264Pic.FrameType = idr ? D3D12_VIDEO_ENCODER_FRAME_TYPE_H264_IDR_FRAME : D3D12_VIDEO_ENCODER_FRAME_TYPE_H264_P_FRAME;
         h264Pic.pic_parameter_set_id = 0;
-        h264Pic.idr_pic_id = static_cast<UINT>(frameIndex_ & 0xFFFFu);
-        h264Pic.PictureOrderCountNumber = static_cast<UINT>(frameIndex_);
-        h264Pic.FrameDecodingOrderNumber = static_cast<UINT>(frameIndex_);
+        h264Pic.idr_pic_id = h264CurrentIdrPicId;
+        h264Pic.PictureOrderCountNumber = h264CurrentPoc;
+        h264Pic.FrameDecodingOrderNumber = h264CurrentDecodingOrder;
         h264Pic.TemporalLayerIndex = 0;
 
         if (!idr && hasReferenceFrame_) {
             h264RefDesc.ReconstructedPictureResourceIndex = 0;
             h264RefDesc.IsLongTermReference = FALSE;
             h264RefDesc.LongTermPictureIdx = 0;
-            h264RefDesc.PictureOrderCountNumber = static_cast<UINT>(frameIndex_ - 1);
-            h264RefDesc.FrameDecodingOrderNumber = static_cast<UINT>(frameIndex_ - 1);
+            h264RefDesc.PictureOrderCountNumber = h264ReferencePoc;
+            h264RefDesc.FrameDecodingOrderNumber = h264ReferenceDecodingOrder;
             h264RefDesc.TemporalLayerIndex = 0;
 
             h264Pic.List0ReferenceFramesCount = 1;
@@ -865,6 +1135,23 @@ void D3D12VideoEncodeBackend::recordEncodeFrame(ID3D12Resource* resource, D3D12_
         referenceFrames.NumTexture2Ds = 1;
         referenceFrames.ppTexture2Ds = &refResource;
         referenceFrames.pSubresources = &refSubresource;
+    }
+
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream refs;
+        refs << "ReferenceDiagnostic frame=" << frameIndex_
+             << " type=" << (idr ? "IDR" : "P")
+             << " referenceCount=" << referenceFrames.NumTexture2Ds
+             << " refResource=" << FormatResourcePointer(refResource)
+             << " refResourcePtrStorage=" << static_cast<const void*>(referenceFrames.ppTexture2Ds)
+             << " refSubresourceStorage=" << static_cast<const void*>(referenceFrames.pSubresources)
+             << " h264PicStorage=" << static_cast<const void*>(&h264Pic)
+             << " h264List0Storage=" << static_cast<const void*>(h264Pic.pList0ReferenceFrames)
+             << " h264RefDescStorage=" << static_cast<const void*>(h264Pic.pReferenceFramesReconPictureDescriptors)
+             << " hevcPicStorage=" << static_cast<const void*>(&hevcPic)
+             << " hevcList0Storage=" << static_cast<const void*>(hevcPic.pList0ReferenceFrames)
+             << " hevcRefDescStorage=" << static_cast<const void*>(hevcPic.pReferenceFramesReconPictureDescriptors);
+        log_.info(refs.str());
     }
 
     D3D12_VIDEO_ENCODER_PICTURE_CONTROL_DESC pictureControl = {};
@@ -893,7 +1180,8 @@ void D3D12VideoEncodeBackend::recordEncodeFrame(ID3D12Resource* resource, D3D12_
     input.PictureControlDesc = pictureControl;
     input.pInputFrame = resource;
     input.InputFrameSubresource = 0;
-    input.CurrentFrameBitstreamMetadataSize = 0;
+    input.CurrentFrameBitstreamMetadataSize = static_cast<UINT>(
+        std::min<size_t>(writer_.pendingBitstreamMetadataSize(), static_cast<size_t>(std::numeric_limits<UINT>::max())));
 
     D3D12_VIDEO_ENCODER_ENCODEFRAME_OUTPUT_ARGUMENTS output = {};
     output.Bitstream.pBuffer = bitstreamBuffer_.Get();
@@ -903,9 +1191,25 @@ void D3D12VideoEncodeBackend::recordEncodeFrame(ID3D12Resource* resource, D3D12_
     output.EncoderOutputMetadata.pBuffer = encoderMetadataBuffer_.Get();
     output.EncoderOutputMetadata.Offset = 0;
 
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream beforeEncode;
+        beforeEncode << "Stage frame=" << frameIndex_
+                     << " before EncodeFrame recording"
+                     << " frameType=" << (idr ? "IDR" : "P")
+                     << " CurrentFrameBitstreamMetadataSize=" << input.CurrentFrameBitstreamMetadataSize
+                     << " outputBitstream=" << FormatResourcePointer(output.Bitstream.pBuffer)
+                     << " outputRecon=" << FormatResourcePointer(output.ReconstructedPicture.pReconstructedPicture)
+                     << " outputMetadata=" << FormatResourcePointer(output.EncoderOutputMetadata.pBuffer);
+        log_.info(beforeEncode.str());
+    }
     videoCommandList_->EncodeFrame(encoder_.Get(), encoderHeap_.Get(), &input, &output);
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream afterEncode;
+        afterEncode << "Stage frame=" << frameIndex_ << " after EncodeFrame recording";
+        log_.info(afterEncode.str());
+    }
 
-    transitionVideo(encoderMetadataBuffer_.Get(), D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ);
+    transitionVideo("encoder metadata buffer", encoderMetadataBuffer_.Get(), D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ);
 
     CodecProfileStorage profile(desc_.codec, desc_.internalFormat);
     D3D12_VIDEO_ENCODER_RESOLVE_METADATA_INPUT_ARGUMENTS resolveInput = {};
@@ -919,64 +1223,228 @@ void D3D12VideoEncodeBackend::recordEncodeFrame(ID3D12Resource* resource, D3D12_
     D3D12_VIDEO_ENCODER_RESOLVE_METADATA_OUTPUT_ARGUMENTS resolveOutput = {};
     resolveOutput.ResolvedLayoutMetadata.pBuffer = resolvedMetadataBuffer_.Get();
     resolveOutput.ResolvedLayoutMetadata.Offset = 0;
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream beforeResolve;
+        beforeResolve << "Stage frame=" << frameIndex_
+                      << " before ResolveEncoderOutputMetadata recording"
+                      << " hwMetadata=" << FormatResourcePointer(resolveInput.HWLayoutMetadata.pBuffer)
+                      << " resolvedMetadata=" << FormatResourcePointer(resolveOutput.ResolvedLayoutMetadata.pBuffer);
+        log_.info(beforeResolve.str());
+    }
     videoCommandList_->ResolveEncoderOutputMetadata(&resolveInput, &resolveOutput);
-
-    if (restoreInputState) {
-        transitionVideo(resource, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ, currentState);
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream afterResolve;
+        afterResolve << "Stage frame=" << frameIndex_ << " after ResolveEncoderOutputMetadata recording";
+        log_.info(afterResolve.str());
     }
 
-    bitstreamState_ = D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE;
-    encoderMetadataState_ = D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ;
-    resolvedMetadataState_ = D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE;
-    reconstructedStates_[currentReconIndex_] = D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE;
+    if (restoreInputState) {
+        transitionVideo("input texture restore", resource, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ, currentState);
+    }
+
+    transitionVideo("bitstream buffer video queue handoff", bitstreamBuffer_.Get(), D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE, D3D12_RESOURCE_STATE_COMMON);
+    transitionVideo("encoder metadata buffer video queue handoff", encoderMetadataBuffer_.Get(), D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ, D3D12_RESOURCE_STATE_COMMON);
+    transitionVideo("resolved metadata buffer video queue handoff", resolvedMetadataBuffer_.Get(), D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE, D3D12_RESOURCE_STATE_COMMON);
+    transitionVideo("current reconstructed texture video queue handoff", reconstructedPictures_[currentReconIndex_].Get(), D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE, D3D12_RESOURCE_STATE_COMMON);
+    if (!idr && hasReferenceFrame_) {
+        transitionVideo("previous reconstructed texture video queue handoff", reconstructedPictures_[previousReconIndex_].Get(), D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ, D3D12_RESOURCE_STATE_COMMON);
+    }
+
+    bitstreamState_ = D3D12_RESOURCE_STATE_COMMON;
+    encoderMetadataState_ = D3D12_RESOURCE_STATE_COMMON;
+    resolvedMetadataState_ = D3D12_RESOURCE_STATE_COMMON;
+    reconstructedStates_[currentReconIndex_] = D3D12_RESOURCE_STATE_COMMON;
+    if (!idr && hasReferenceFrame_) {
+        reconstructedStates_[previousReconIndex_] = D3D12_RESOURCE_STATE_COMMON;
+    }
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream states;
+        states << "FrameStateAfterBarriers frame=" << frameIndex_
+               << " input=" << FormatResourceState(restoreInputState ? currentState : D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ)
+               << "(" << FormatResourceStateHex(restoreInputState ? currentState : D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ) << ")"
+               << " bitstream=" << FormatResourceState(bitstreamState_) << "(" << FormatResourceStateHex(bitstreamState_) << ")"
+               << " encoderMetadata=" << FormatResourceState(encoderMetadataState_) << "(" << FormatResourceStateHex(encoderMetadataState_) << ")"
+               << " resolvedMetadata=" << FormatResourceState(resolvedMetadataState_) << "(" << FormatResourceStateHex(resolvedMetadataState_) << ")"
+               << " currentRecon=" << FormatResourceState(reconstructedStates_[currentReconIndex_]) << "(" << FormatResourceStateHex(reconstructedStates_[currentReconIndex_]) << ")"
+               << " previousRecon=" << FormatResourceState(reconstructedStates_[previousReconIndex_]) << "(" << FormatResourceStateHex(reconstructedStates_[previousReconIndex_]) << ")";
+        log_.info(states.str());
+    }
 }
 
 void D3D12VideoEncodeBackend::signalVideoAndWaitOnCopy() {
-    const uint64_t signalValue = ++videoFenceValue_;
-    throw_hr(videoQueue_->Signal(videoFence_.Get(), signalValue), "videoQueue Signal");
-    throw_hr(desc_.input.core->GetDirectCommandQueue()->Wait(videoFence_.Get(), signalValue), "directQueue Wait(videoFence)");
+    try {
+        if (ShouldTraceFrame(frameIndex_)) {
+            std::ostringstream beforeSignal;
+            beforeSignal << "Stage frame=" << frameIndex_ << " before Video queue Signal";
+            log_.info(beforeSignal.str());
+        }
+        const auto point = videoQueue_.SignalPoint();
+        if (ShouldTraceFrame(frameIndex_)) {
+            log_.info(FormatFenceProgress("Stage after Video queue Signal", point));
+            std::ostringstream beforeWait;
+            beforeWait << "Stage frame=" << frameIndex_ << " before Direct queue GpuWaitPoint";
+            log_.info(beforeWait.str());
+        }
+        desc_.input.core->DirectQueue().GpuWaitPoint(point);
+        if (ShouldTraceFrame(frameIndex_)) {
+            std::ostringstream afterWait;
+            afterWait << "Stage frame=" << frameIndex_ << " after Direct queue GpuWaitPoint";
+            log_.info(afterWait.str());
+        }
+    } catch (const std::exception& e) {
+        throw D3DVideoEncoderError(std::string("D3D12 Video Encode video/direct queue sync failed: ") + e.what());
+    }
 }
 
 void D3D12VideoEncodeBackend::copyOutputsToReadback() {
-    throw_hr(copyAllocator_->Reset(), "copyAllocator Reset");
-    throw_hr(copyCommandList_->Reset(copyAllocator_.Get(), nullptr), "copyCommandList Reset");
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream beforeReset;
+        beforeReset << "Stage frame=" << frameIndex_ << " before Direct copy allocator Reset";
+        log_.info(beforeReset.str());
+    }
+    try {
+        copyAllocator_.Reset();
+    } catch (const std::exception& e) {
+        throw D3DVideoEncoderError(std::string("copyAllocator Reset failed: ") + e.what());
+    }
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream afterReset;
+        afterReset << "Stage frame=" << frameIndex_ << " after Direct copy allocator Reset";
+        log_.info(afterReset.str());
+    }
+    throw_hr(copyCommandList_->Reset(copyAllocator_.GetAllocator(), nullptr), "copyCommandList Reset");
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream afterCommandListReset;
+        afterCommandListReset << "Stage frame=" << frameIndex_ << " after Direct copy command list Reset";
+        log_.info(afterCommandListReset.str());
+    }
 
-    transitionCopy(bitstreamBuffer_.Get(), bitstreamState_, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    transitionCopy(resolvedMetadataBuffer_.Get(), resolvedMetadataState_, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    bitstreamState_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    resolvedMetadataState_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    const auto bitstreamBeforeCopy = bitstreamState_;
+    const auto resolvedMetadataBeforeCopy = resolvedMetadataState_;
+    auto transitionCopyAndTrack = [&](const char* logicalName,
+                                      ID3D12Resource* resource,
+                                      D3D12_RESOURCE_STATES& stateMember,
+                                      D3D12_RESOURCE_STATES after) {
+        const auto before = stateMember;
+        if (before == after) return;
+        if (!transitionCopy(logicalName, resource, before, after)) {
+            std::ostringstream oss;
+            oss << "copy transition for " << logicalName
+                << " from " << FormatResourceState(before)
+                << "(" << FormatResourceStateHex(before) << ")"
+                << " to " << FormatResourceState(after)
+                << "(" << FormatResourceStateHex(after) << ")"
+                << " was not recorded.";
+            throw D3DVideoEncoderError(oss.str());
+        }
+        stateMember = after;
+    };
+
+    transitionCopyAndTrack("bitstream buffer", bitstreamBuffer_.Get(), bitstreamState_, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    transitionCopyAndTrack("resolved metadata buffer", resolvedMetadataBuffer_.Get(), resolvedMetadataState_, D3D12_RESOURCE_STATE_COPY_SOURCE);
 
     copyCommandList_->CopyBufferRegion(bitstreamReadback_.Get(), 0, bitstreamBuffer_.Get(), 0, bitstreamBufferSize_);
     copyCommandList_->CopyBufferRegion(resolvedMetadataReadback_.Get(), 0, resolvedMetadataBuffer_.Get(), 0, resolvedMetadataBufferSize_);
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream copyRecorded;
+        copyRecorded << "Stage frame=" << frameIndex_
+                     << " after Direct CopyBufferRegion recording"
+                     << " bitstreamBytes=" << bitstreamBufferSize_
+                     << " metadataBytes=" << resolvedMetadataBufferSize_;
+        log_.info(copyRecorded.str());
+    }
 
+    const auto bitstreamAfterCopy = bitstreamState_;
+    const auto resolvedMetadataAfterCopy = resolvedMetadataState_;
+    transitionCopyAndTrack("bitstream buffer", bitstreamBuffer_.Get(), bitstreamState_, D3D12_RESOURCE_STATE_COMMON);
+    transitionCopyAndTrack("resolved metadata buffer", resolvedMetadataBuffer_.Get(), resolvedMetadataState_, D3D12_RESOURCE_STATE_COMMON);
+
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream bitstream;
+        bitstream << "DirectCopyState frame=" << frameIndex_
+                  << " resource=bitstream buffer"
+                  << " beforeCopy=" << FormatResourceState(bitstreamBeforeCopy) << "(" << FormatResourceStateHex(bitstreamBeforeCopy) << ")"
+                  << " duringCopy=COPY_SOURCE(" << FormatResourceStateHex(D3D12_RESOURCE_STATE_COPY_SOURCE) << ")"
+                  << " afterCopy=" << FormatResourceState(bitstreamAfterCopy) << "(" << FormatResourceStateHex(bitstreamAfterCopy) << ")"
+                  << " stateMember=" << FormatResourceState(bitstreamState_) << "(" << FormatResourceStateHex(bitstreamState_) << ")";
+        log_.info(bitstream.str());
+
+        std::ostringstream metadata;
+        metadata << "DirectCopyState frame=" << frameIndex_
+                 << " resource=resolved metadata buffer"
+                 << " beforeCopy=" << FormatResourceState(resolvedMetadataBeforeCopy) << "(" << FormatResourceStateHex(resolvedMetadataBeforeCopy) << ")"
+                 << " duringCopy=COPY_SOURCE(" << FormatResourceStateHex(D3D12_RESOURCE_STATE_COPY_SOURCE) << ")"
+                 << " afterCopy=" << FormatResourceState(resolvedMetadataAfterCopy) << "(" << FormatResourceStateHex(resolvedMetadataAfterCopy) << ")"
+                 << " stateMember=" << FormatResourceState(resolvedMetadataState_) << "(" << FormatResourceStateHex(resolvedMetadataState_) << ")";
+        log_.info(metadata.str());
+    }
+
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream beforeClose;
+        beforeClose << "Stage frame=" << frameIndex_ << " before Direct copy command list Close";
+        log_.info(beforeClose.str());
+    }
     throw_hr(copyCommandList_->Close(), "copyCommandList Close");
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream afterClose;
+        afterClose << "Stage frame=" << frameIndex_ << " after Direct copy command list Close";
+        log_.info(afterClose.str());
+    }
     ID3D12CommandList* lists[] = { copyCommandList_.Get() };
-    desc_.input.core->GetDirectCommandQueue()->ExecuteCommandLists(1, lists);
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream beforeExecute;
+        beforeExecute << "Stage frame=" << frameIndex_ << " before Direct copy ExecuteCommandLists";
+        log_.info(beforeExecute.str());
+    }
+    desc_.input.core->DirectQueue().ExecuteCommandLists(1, lists);
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream afterExecute;
+        afterExecute << "Stage frame=" << frameIndex_ << " after Direct copy ExecuteCommandLists";
+        log_.info(afterExecute.str());
+    }
 }
 
 void D3D12VideoEncodeBackend::waitForCopyQueue() {
-    const uint64_t signalValue = ++copyFenceValue_;
-    ID3D12CommandQueue* queue = desc_.input.core->GetDirectCommandQueue();
-    throw_hr(queue->Signal(copyFence_.Get(), signalValue), "directQueue Signal(copyFence)");
-    if (copyFence_->GetCompletedValue() < signalValue) {
-        void* eventHandle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!eventHandle) {
-            throw D3DVideoEncoderError("CreateEventW failed while waiting for D3D12 Video Encode copy fence.");
+    try {
+        auto& directQueue = desc_.input.core->DirectQueue();
+        if (ShouldTraceFrame(frameIndex_)) {
+            std::ostringstream beforeSignal;
+            beforeSignal << "Stage frame=" << frameIndex_ << " before Direct queue Signal";
+            log_.info(beforeSignal.str());
         }
-        throw_hr(copyFence_->SetEventOnCompletion(signalValue, eventHandle), "copyFence SetEventOnCompletion");
-        WaitForSingleObject(static_cast<HANDLE>(eventHandle), INFINITE);
-        CloseHandle(static_cast<HANDLE>(eventHandle));
+        const auto point = directQueue.SignalPoint();
+        if (ShouldTraceFrame(frameIndex_)) {
+            log_.info(FormatFenceProgress("Stage after Direct queue Signal", point));
+            std::ostringstream beforeWait;
+            beforeWait << "Stage frame=" << frameIndex_ << " before Direct fence wait";
+            log_.info(beforeWait.str());
+        }
+        directQueue.CpuWaitPoint(point);
+        if (ShouldTraceFrame(frameIndex_)) {
+            log_.info(FormatFenceProgress("Stage after Direct fence wait", point));
+        }
+    } catch (const std::exception& e) {
+        throw D3DVideoEncoderError(std::string("D3D12 Video Encode direct queue wait failed: ") + e.what());
     }
 }
 
 void D3D12VideoEncodeBackend::writeResolvedBitstream(int64_t timestamp100ns, int64_t duration100ns) {
-    D3D12_RANGE readRange = { 0, static_cast<SIZE_T>(sizeof(D3D12_VIDEO_ENCODER_OUTPUT_METADATA)) };
-    void* metadataMapped = nullptr;
-    throw_hr(resolvedMetadataReadback_->Map(0, &readRange, &metadataMapped), "Map resolved metadata readback");
-    const auto* metadata = static_cast<const D3D12_VIDEO_ENCODER_OUTPUT_METADATA*>(metadataMapped);
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream beforeMap;
+        beforeMap << "Stage frame=" << frameIndex_ << " before metadata MapRead";
+        log_.info(beforeMap.str());
+    }
+    auto metadataRange = resolvedMetadataReadback_.MapRead(0, sizeof(D3D12_VIDEO_ENCODER_OUTPUT_METADATA));
+    const auto* metadata = reinterpret_cast<const D3D12_VIDEO_ENCODER_OUTPUT_METADATA*>(metadataRange.Data());
     const D3D12_VIDEO_ENCODER_OUTPUT_METADATA metadataCopy = *metadata;
-    D3D12_RANGE emptyRange = { 0, 0 };
-    resolvedMetadataReadback_->Unmap(0, &emptyRange);
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream afterMap;
+        afterMap << "Stage frame=" << frameIndex_
+                 << " after metadata MapRead"
+                 << " EncodeErrorFlags=0x" << std::hex << std::uppercase << metadataCopy.EncodeErrorFlags
+                 << " EncodedBytes=" << std::dec << metadataCopy.EncodedBitstreamWrittenBytesCount;
+        log_.info(afterMap.str());
+    }
 
     if (metadataCopy.EncodeErrorFlags != D3D12_VIDEO_ENCODER_ENCODE_ERROR_FLAG_NO_ERROR) {
         std::ostringstream oss;
@@ -995,17 +1463,25 @@ void D3D12VideoEncodeBackend::writeResolvedBitstream(int64_t timestamp100ns, int
         throw D3DVideoEncoderError(oss.str());
     }
 
-    D3D12_RANGE bitstreamRange = { 0, static_cast<SIZE_T>(bytesToWrite) };
-    void* bitstreamMapped = nullptr;
-    throw_hr(bitstreamReadback_->Map(0, &bitstreamRange, &bitstreamMapped), "Map bitstream readback");
-    const auto* bitstream = static_cast<const uint8_t*>(bitstreamMapped);
-    try {
-        writer_.writeAccessUnit(bitstream, static_cast<size_t>(bytesToWrite), timestamp100ns, duration100ns);
-    } catch (...) {
-        bitstreamReadback_->Unmap(0, &emptyRange);
-        throw;
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream beforeBitstreamMap;
+        beforeBitstreamMap << "Stage frame=" << frameIndex_
+                           << " before bitstream MapRead"
+                           << " bytes=" << bytesToWrite;
+        log_.info(beforeBitstreamMap.str());
     }
-    bitstreamReadback_->Unmap(0, &emptyRange);
+    auto bitstreamRange = bitstreamReadback_.MapRead(0, bytesToWrite);
+    const auto* bitstream = reinterpret_cast<const uint8_t*>(bitstreamRange.Data());
+    writer_.writeAccessUnit(bitstream, static_cast<size_t>(bytesToWrite), timestamp100ns, duration100ns);
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream afterWrite;
+        afterWrite << "Stage frame=" << frameIndex_
+                   << " after writer output"
+                   << " bytes=" << bytesToWrite
+                   << " timestamp100ns=" << timestamp100ns
+                   << " duration100ns=" << duration100ns;
+        log_.info(afterWrite.str());
+    }
 }
 
 void D3D12VideoEncodeBackend::encode(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState, int64_t timestamp100ns, int64_t duration100ns) {
@@ -1025,15 +1501,60 @@ void D3D12VideoEncodeBackend::encode(ID3D12Resource* resource, D3D12_RESOURCE_ST
         restoreEncodeResourceState = true;
     } else {
         validateInputResource(resource);
+        if (currentState == D3D12_RESOURCE_STATE_COPY_DEST) {
+            throw D3DVideoEncoderError(
+                "D3D12VideoEncodeBackend input state " + FormatResourceState(currentState) +
+                " cannot be used for native D3D12 Video Encode input cross-queue video encode handoff. "
+                "Transition the resource to COMMON on the producer queue before calling write().");
+        }
     }
 
-    throw_hr(videoAllocator_->Reset(), "videoAllocator Reset");
-    throw_hr(videoCommandList_->Reset(videoAllocator_.Get()), "videoCommandList Reset");
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream beforeReset;
+        beforeReset << "Stage frame=" << frameIndex_ << " before Video allocator Reset";
+        log_.info(beforeReset.str());
+    }
+    try {
+        videoAllocator_.Reset();
+    } catch (const std::exception& e) {
+        throw D3DVideoEncoderError(std::string("videoAllocator Reset failed: ") + e.what());
+    }
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream afterReset;
+        afterReset << "Stage frame=" << frameIndex_ << " after Video allocator Reset";
+        log_.info(afterReset.str());
+    }
+    throw_hr(videoCommandList_->Reset(videoAllocator_.GetAllocator()), "videoCommandList Reset");
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream afterCommandListReset;
+        afterCommandListReset << "Stage frame=" << frameIndex_ << " after Video command list Reset";
+        log_.info(afterCommandListReset.str());
+    }
     recordEncodeFrame(encodeResource, encodeState, restoreEncodeResourceState);
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream beforeClose;
+        beforeClose << "Stage frame=" << frameIndex_ << " before Video command list Close";
+        log_.info(beforeClose.str());
+    }
     throw_hr(videoCommandList_->Close(), "videoCommandList Close");
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream afterClose;
+        afterClose << "Stage frame=" << frameIndex_ << " after Video command list Close";
+        log_.info(afterClose.str());
+    }
 
     ID3D12CommandList* lists[] = { videoCommandList_.Get() };
-    videoQueue_->ExecuteCommandLists(1, lists);
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream beforeExecute;
+        beforeExecute << "Stage frame=" << frameIndex_ << " before Video ExecuteCommandLists";
+        log_.info(beforeExecute.str());
+    }
+    videoQueue_.ExecuteCommandLists(1, lists);
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream afterExecute;
+        afterExecute << "Stage frame=" << frameIndex_ << " after Video ExecuteCommandLists";
+        log_.info(afterExecute.str());
+    }
 
     signalVideoAndWaitOnCopy();
     copyOutputsToReadback();
@@ -1045,6 +1566,19 @@ void D3D12VideoEncodeBackend::encode(ID3D12Resource* resource, D3D12_RESOURCE_ST
         yuvToRgbaTextureState_ = D3D12_RESOURCE_STATE_COMMON;
     }
 
+    if (desc_.codec == VideoCodec::H264) {
+        const bool h264Idr = is_idr_frame(frameIndex_, desc_.gopLength) || !hasReferenceFrame_;
+        const uint64_t h264FrameOffset = frameIndex_ - h264CurrentGopStartFrame_;
+        const uint32_t h264FrameInGop = static_cast<uint32_t>(std::min<uint64_t>(h264FrameOffset, UINT32_MAX));
+        const uint32_t h264CurrentDecodingOrder = h264Idr ? 0u : h264FrameInGop;
+        const uint32_t h264CurrentPoc = h264Idr ? 0u : h264FrameInGop;
+
+        h264PreviousReferenceDecodingOrder_ = h264CurrentDecodingOrder;
+        h264PreviousReferencePoc_ = h264CurrentPoc;
+        if (h264Idr) {
+            h264NextIdrPicId_ = next_h264_idr_pic_id(h264NextIdrPicId_);
+        }
+    }
     hasReferenceFrame_ = true;
     ++frameIndex_;
 }
@@ -1064,19 +1598,17 @@ void D3D12VideoEncodeBackend::destroyObjects() noexcept {
     convertedTexture_ = {};
     yuvToRgbaTexture_ = {};
     resizedTexture_ = {};
-    for (auto& recon : reconstructedPictures_) recon.Reset();
-    resolvedMetadataReadback_.Reset();
-    resolvedMetadataBuffer_.Reset();
-    encoderMetadataBuffer_.Reset();
-    bitstreamReadback_.Reset();
-    bitstreamBuffer_.Reset();
-    copyFence_.Reset();
-    videoFence_.Reset();
+    for (auto& recon : reconstructedPictures_) recon = {};
+    resolvedMetadataReadback_ = {};
+    resolvedMetadataBuffer_ = {};
+    encoderMetadataBuffer_ = {};
+    bitstreamReadback_ = {};
+    bitstreamBuffer_ = {};
     copyCommandList_.Reset();
-    copyAllocator_.Reset();
+    copyAllocator_ = {};
     videoCommandList_.Reset();
-    videoAllocator_.Reset();
-    videoQueue_.Reset();
+    videoAllocator_ = {};
+    videoQueue_ = {};
     encoderHeap_.Reset();
     encoder_.Reset();
     videoDevice3_.Reset();

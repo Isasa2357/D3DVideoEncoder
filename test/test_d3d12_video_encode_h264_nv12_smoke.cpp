@@ -141,6 +141,8 @@ void upload_black_nv12(
     src.PlacedFootprint = footprint;
 
     commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    auto handoffBarrier = transition_barrier(texture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+    commandList->ResourceBarrier(1, &handoffBarrier);
     throw_if_failed(commandList->Close(), "Close upload command list");
     ID3D12CommandList* lists[] = { commandList.Get() };
     core.GetDirectCommandQueue()->ExecuteCommandLists(1, lists);
@@ -215,7 +217,7 @@ int main() {
 
         D3D12VideoEncoder encoder(desc);
         for (int i = 0; i < 30; ++i) {
-            encoder.write(texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST);
+            encoder.write(texture.Get(), D3D12_RESOURCE_STATE_COMMON);
         }
         encoder.close();
 

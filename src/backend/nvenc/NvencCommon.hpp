@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 #include <wrl/client.h>
@@ -58,15 +59,26 @@ private:
 
 NvencFormatCapability QueryNvencDeviceSupport(void* device, NV_ENC_DEVICE_TYPE deviceType, VideoCodec codec, VideoPixelFormat inputFormat);
 
+enum class NvencDirectXDeviceKind {
+    D3D11,
+    D3D12
+};
+
+class NvencD3D12OutputStrategy;
+
 class NvencEncoderSession {
 public:
-    NvencEncoderSession() = default;
+    NvencEncoderSession();
     ~NvencEncoderSession();
 
     NvencEncoderSession(const NvencEncoderSession&) = delete;
     NvencEncoderSession& operator=(const NvencEncoderSession&) = delete;
 
-    void initialize(void* device, NV_ENC_DEVICE_TYPE deviceType, const NvencSessionDesc& desc);
+    void initialize(
+        void* device,
+        NV_ENC_DEVICE_TYPE deviceType,
+        NvencDirectXDeviceKind deviceKind,
+        const NvencSessionDesc& desc);
     void encodeDirectXResource(void* resource, int64_t timestamp100ns, int64_t duration100ns);
     void flush();
     void close();
@@ -94,7 +106,13 @@ private:
 
     void createBitstreamBuffer();
     void destroyBitstreamBuffer() noexcept;
+    void registerAsyncEvent();
+    void unregisterAsyncEvent() noexcept;
+    bool waitForAsyncCompletion(const char* operation, uint32_t frameIndex);
     void writeBitstream(void* bitstreamBuffer);
+    void encodeD3D12Resource(void* resource, int64_t timestamp100ns, int64_t duration100ns);
+    void flushD3D12();
+    void trace(const std::string& message) const;
     RegisteredInputResource& getOrRegisterResource(void* resource);
     void unregisterAllResources() noexcept;
 
@@ -102,9 +120,17 @@ private:
     NvencSessionDesc desc_ = {};
     void* encoder_ = nullptr;
     void* bitstreamBuffer_ = nullptr;
+    NvencDirectXDeviceKind deviceKind_ = NvencDirectXDeviceKind::D3D11;
+    std::unique_ptr<NvencD3D12OutputStrategy> d3d12Output_;
     NvencOutputMuxer muxer_;
     std::vector<RegisteredInputResource> registeredResources_;
     bool eosSent_ = false;
+    bool traceEnabled_ = false;
+    bool internalAsync_ = false;
+    HANDLE completionEvent_ = nullptr;
+    bool completionEventRegistered_ = false;
+    uint64_t sentFrameCount_ = 0;
+    uint64_t receivedPacketCount_ = 0;
     int64_t currentTimestamp100ns_ = 0;
     int64_t currentDuration100ns_ = 0;
 };

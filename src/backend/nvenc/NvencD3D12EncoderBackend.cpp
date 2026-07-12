@@ -4,8 +4,9 @@
 
 #include <D3D12Helper/D3D12Core/D3D12Barrier.hpp>
 #include <D3D12Helper/D3D12Framework/D3D12Helpers.hpp>
+#include <D3D12Helper/D3D12Gpu/D3D12ResourceValidation.hpp>
+#include <D3D12Helper/D3D12Gpu/D3D12ResourceView.hpp>
 
-#include <wrl/client.h>
 #include <exception>
 #include <sstream>
 #include <utility>
@@ -27,12 +28,6 @@ D3D12CoreLib::Processing::ProcessingColorRange ToProcessingRange(VideoColorRange
     case VideoColorRange::Limited: return D3D12CoreLib::Processing::ProcessingColorRange::Limited;
     default: return D3D12CoreLib::Processing::ProcessingColorRange::Limited;
     }
-}
-
-std::string FormatDxgi(DXGI_FORMAT format) {
-    std::ostringstream oss;
-    oss << static_cast<int>(format);
-    return oss.str();
 }
 
 bool RectEqualsFull(const D3D12CoreLib::Processing::ProcessingRect& r, UINT width, UINT height) noexcept {
@@ -152,7 +147,11 @@ void NvencD3D12EncoderBackend::initialize(const D3D12VideoEncoderDesc& desc) {
     log_.info(useProcessing_
         ? "NvencD3D12EncoderBackend initialize with D3D12Processing conversion/crop/resize"
         : "NvencD3D12EncoderBackend initialize with direct NV12/P010 input");
-    session_.initialize(desc_.input.core->GetDevice(), NV_ENC_DEVICE_TYPE_DIRECTX, sessionDesc);
+    session_.initialize(
+        desc_.input.core->GetDevice(),
+        NV_ENC_DEVICE_TYPE_DIRECTX,
+        NvencDirectXDeviceKind::D3D12,
+        sessionDesc);
     open_ = true;
 }
 
@@ -199,24 +198,19 @@ void NvencD3D12EncoderBackend::validateInputResource(ID3D12Resource* resource) c
         throw D3DVideoEncoderError("NvencD3D12 encode received a null ID3D12Resource.");
     }
 
-    const D3D12_RESOURCE_DESC rd = resource->GetDesc();
-    if (rd.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-        rd.Width != sourceWidth() ||
-        rd.Height != sourceHeight() ||
-        rd.Format != desc_.input.inputFormat) {
-        std::ostringstream oss;
-        oss << "NvencD3D12 input resource mismatch. expected="
-            << sourceWidth() << "x" << sourceHeight()
-            << " inputFormat=" << FormatDxgi(desc_.input.inputFormat)
-            << " actual=" << static_cast<uint64_t>(rd.Width) << "x" << rd.Height
-            << " format=" << FormatDxgi(rd.Format);
-        throw D3DVideoEncoderError(oss.str());
-    }
+    D3D12CoreLib::D3D12Texture2DRequirement requirement = {};
+    requirement.width = sourceWidth();
+    requirement.height = sourceHeight();
+    requirement.format = desc_.input.inputFormat;
+    requirement.expectedDevice = desc_.input.core->GetDevice();
 
-    Microsoft::WRL::ComPtr<ID3D12Device> resourceDevice;
-    resource->GetDevice(IID_PPV_ARGS(&resourceDevice));
-    if (resourceDevice.Get() != desc_.input.core->GetDevice()) {
-        throw D3DVideoEncoderError("NvencD3D12 input resource belongs to a different ID3D12Device than desc.input.core.");
+    const auto validation = D3D12CoreLib::ValidateTexture2DView(
+        D3D12CoreLib::D3D12ResourceView(resource),
+        requirement);
+    if (!validation) {
+        std::ostringstream oss;
+        oss << "NvencD3D12 input resource validation failed: " << validation.Message();
+        throw D3DVideoEncoderError(oss.str());
     }
 }
 
@@ -276,12 +270,9 @@ ID3D12Resource* NvencD3D12EncoderBackend::convertToInternalFormat(ID3D12Resource
     cbvSrvUavAllocator_.Reset();
     samplerAllocator_.Reset();
 
-    Microsoft::WRL::ComPtr<ID3D12Resource> srcComPtr;
-    srcComPtr = resource;
-    D3D12CoreLib::D3D12Resource src(std::move(srcComPtr), currentState);
-
     const auto srcRect = resolvedSourceRect();
-    D3D12CoreLib::D3D12Resource* convertSource = &src;
+    D3D12CoreLib::D3D12ResourceView srcView(resource);
+    D3D12CoreLib::D3D12ResourceView convertSource = srcView;
     D3D12_RESOURCE_STATES convertSourceState = currentState;
 
     commandContext_.Reset();
@@ -306,17 +297,27 @@ ID3D12Resource* NvencD3D12EncoderBackend::convertToInternalFormat(ID3D12Resource
             fused.filter = processingFilter();
             fused.srcRect = srcRect;
             fused.dstRect = { 0, 0, desc_.width, desc_.height };
-            fusedProcessor_.RecordConvertResize(commandContext_, src, resizedTexture_, fused, resizeStates);
+            fusedProcessor_.RecordConvertResizeView(
+                commandContext_,
+                srcView,
+                D3D12CoreLib::D3D12ResourceView(resizedTexture_),
+                fused,
+                resizeStates);
         } else {
             D3D12CoreLib::Processing::ResizeDesc resize = {};
             resize.filter = processingFilter();
             resize.srcRect = srcRect;
             resize.dstRect = { 0, 0, desc_.width, desc_.height };
-            resizer_.RecordResize(commandContext_, src, resizedTexture_, resize, resizeStates);
+            resizer_.RecordResizeView(
+                commandContext_,
+                srcView,
+                D3D12CoreLib::D3D12ResourceView(resizedTexture_),
+                resize,
+                resizeStates);
         }
 
         resizedTextureState_ = D3D12_RESOURCE_STATE_COMMON;
-        convertSource = &resizedTexture_;
+        convertSource = D3D12CoreLib::D3D12ResourceView(resizedTexture_);
         convertSourceState = D3D12_RESOURCE_STATE_COMMON;
     }
 
@@ -338,7 +339,12 @@ ID3D12Resource* NvencD3D12EncoderBackend::convertToInternalFormat(ID3D12Resource
     convertStates.dstBefore = convertedTextureState_;
     convertStates.dstAfter = D3D12_RESOURCE_STATE_COMMON;
 
-    formatConverter_.RecordConvert(commandContext_, *convertSource, convertedTexture_, convert, convertStates);
+    formatConverter_.RecordConvertView(
+        commandContext_,
+        convertSource,
+        D3D12CoreLib::D3D12ResourceView(convertedTexture_),
+        convert,
+        convertStates);
     commandContext_.Close();
 
     ID3D12CommandList* lists[] = { commandContext_.GetCommandList() };
