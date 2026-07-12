@@ -331,6 +331,9 @@ void NvencEncoderSession::initialize(
     if (desc.inputFormat != VideoPixelFormat::NV12 && desc.inputFormat != VideoPixelFormat::P010) {
         throw D3DVideoEncoderError("NVENC backend requires NV12 or P010 input.");
     }
+    if (!IsSupportedNvencBFrameCount(desc.bFrameCount)) {
+        throw D3DVideoEncoderError("NVENC D3D11/D3D12 backends currently require bFrameCount=0.");
+    }
 
     desc_ = desc;
     deviceKind_ = deviceKind;
@@ -784,13 +787,8 @@ void NvencEncoderSession::flush() {
         ThrowNvenc(status, "nvEncEncodePicture(EOS)", __FILE__, __LINE__, describe());
     }
     if (ShouldDrainNvencEos(status, sentFrameCount_, receivedPacketCount_)) {
-        try {
-            waitForAsyncCompletion("EOS", static_cast<uint32_t>(sentFrameCount_));
-            writeBitstream(bitstreamBuffer_);
-        } catch (...) {
-            // Some drivers signal EOS without producing an extra output packet.
-            // Ignore empty/lock failures on EOS; previously encoded packets remain valid.
-        }
+        waitForAsyncCompletion("EOS", static_cast<uint32_t>(sentFrameCount_));
+        writeBitstream(bitstreamBuffer_);
     } else if (status == NV_ENC_SUCCESS) {
         trace(describe() + ": EOS produced no pending packet; skip nvEncLockBitstream sent=" +
               std::to_string(sentFrameCount_) + " received=" + std::to_string(receivedPacketCount_));

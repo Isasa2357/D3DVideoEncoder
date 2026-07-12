@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -111,6 +112,14 @@ std::string FormatFenceProgress(const char* label, const D3D12CoreLib::D3D12Queu
     oss << label
         << " value=" << point.GetValue()
         << " completed=" << (point.GetFence() ? point.GetFence()->GetCompletedValue() : 0);
+    return oss.str();
+}
+
+std::string FormatFenceProgress(const char* label, UINT64 value, ID3D12Fence* fence) {
+    std::ostringstream oss;
+    oss << label
+        << " value=" << value
+        << " completed=" << (fence ? fence->GetCompletedValue() : 0);
     return oss.str();
 }
 
@@ -675,6 +684,11 @@ void D3D12VideoEncodeBackend::createQueuesAndCommands() {
             D3D12_COMMAND_LIST_TYPE_DIRECT,
             copyAllocator_);
         throw_hr(copyCommandList_->Close(), "Close initial copy command list");
+
+        // The largest ordered phases contain six video transitions and two copy
+        // transitions. Reserve once so Clear()/Transition() never allocate per frame.
+        videoBarriers_.Reserve(6);
+        copyBarriers_.Reserve(2);
     } catch (const D3DVideoEncoderError&) {
         throw;
     } catch (const std::exception& e) {
@@ -911,42 +925,15 @@ void D3D12VideoEncodeBackend::transitionVideo(const char* logicalName, ID3D12Res
         std::ostringstream oss;
         oss << "Stage frame=" << frameIndex_
             << " commandList=VIDEO_ENCODE"
-            << " before BarrierBatch construction"
+            << " queue barrier"
             << " resource=" << (logicalName ? logicalName : "(unnamed)")
             << " ptr=" << FormatResourcePointer(resource)
             << " before=" << FormatResourceState(before) << "(" << FormatResourceStateHex(before) << ")"
             << " after=" << FormatResourceState(after) << "(" << FormatResourceStateHex(after) << ")";
         log_.info(oss.str());
     }
-    D3D12CoreLib::D3D12BarrierBatch barriers;
-    if (ShouldTraceFrame(frameIndex_)) {
-        std::ostringstream oss;
-        oss << "Stage frame=" << frameIndex_
-            << " commandList=VIDEO_ENCODE"
-            << " after BarrierBatch construction"
-            << " resource=" << (logicalName ? logicalName : "(unnamed)");
-        log_.info(oss.str());
-    }
-    if (barriers.Transition(resource, before, after)) {
-        if (ShouldTraceFrame(frameIndex_)) {
-            log_.info(FormatTransitionDiagnostic("VIDEO_ENCODE", frameIndex_, logicalName, resource, before, after));
-            std::ostringstream beforeRecord;
-            beforeRecord << "Stage frame=" << frameIndex_
-                         << " commandList=VIDEO_ENCODE"
-                         << " before ResourceBarrier recording"
-                         << " resource=" << (logicalName ? logicalName : "(unnamed)")
-                         << " count=" << barriers.Count();
-            log_.info(beforeRecord.str());
-        }
-        videoCommandList_->ResourceBarrier(barriers.Count(), barriers.Data());
-        if (ShouldTraceFrame(frameIndex_)) {
-            std::ostringstream afterRecord;
-            afterRecord << "Stage frame=" << frameIndex_
-                        << " commandList=VIDEO_ENCODE"
-                        << " after ResourceBarrier recording"
-                        << " resource=" << (logicalName ? logicalName : "(unnamed)");
-            log_.info(afterRecord.str());
-        }
+    if (videoBarriers_.Transition(resource, before, after) && ShouldTraceFrame(frameIndex_)) {
+        log_.info(FormatTransitionDiagnostic("VIDEO_ENCODE", frameIndex_, logicalName, resource, before, after));
     }
 }
 
@@ -956,45 +943,40 @@ bool D3D12VideoEncodeBackend::transitionCopy(const char* logicalName, ID3D12Reso
         std::ostringstream oss;
         oss << "Stage frame=" << frameIndex_
             << " commandList=DIRECT"
-            << " before BarrierBatch construction"
+            << " queue barrier"
             << " resource=" << (logicalName ? logicalName : "(unnamed)")
             << " ptr=" << FormatResourcePointer(resource)
             << " before=" << FormatResourceState(before) << "(" << FormatResourceStateHex(before) << ")"
             << " after=" << FormatResourceState(after) << "(" << FormatResourceStateHex(after) << ")";
         log_.info(oss.str());
     }
-    D3D12CoreLib::D3D12BarrierBatch barriers;
+    const bool added = copyBarriers_.Transition(resource, before, after);
+    if (added && ShouldTraceFrame(frameIndex_)) {
+        log_.info(FormatTransitionDiagnostic("DIRECT", frameIndex_, logicalName, resource, before, after));
+    }
+    return added;
+}
+
+void D3D12VideoEncodeBackend::recordVideoBarrierPhase() {
+    if (videoBarriers_.Empty()) return;
     if (ShouldTraceFrame(frameIndex_)) {
         std::ostringstream oss;
         oss << "Stage frame=" << frameIndex_
-            << " commandList=DIRECT"
-            << " after BarrierBatch construction"
-            << " resource=" << (logicalName ? logicalName : "(unnamed)");
+            << " commandList=VIDEO_ENCODE record barrier phase count=" << videoBarriers_.Count();
         log_.info(oss.str());
     }
-    if (barriers.Transition(resource, before, after)) {
-        if (ShouldTraceFrame(frameIndex_)) {
-            log_.info(FormatTransitionDiagnostic("DIRECT", frameIndex_, logicalName, resource, before, after));
-            std::ostringstream beforeRecord;
-            beforeRecord << "Stage frame=" << frameIndex_
-                         << " commandList=DIRECT"
-                         << " before ResourceBarrier recording"
-                         << " resource=" << (logicalName ? logicalName : "(unnamed)")
-                         << " count=" << barriers.Count();
-            log_.info(beforeRecord.str());
-        }
-        copyCommandList_->ResourceBarrier(barriers.Count(), barriers.Data());
-        if (ShouldTraceFrame(frameIndex_)) {
-            std::ostringstream afterRecord;
-            afterRecord << "Stage frame=" << frameIndex_
-                        << " commandList=DIRECT"
-                        << " after ResourceBarrier recording"
-                        << " resource=" << (logicalName ? logicalName : "(unnamed)");
-            log_.info(afterRecord.str());
-        }
-        return true;
+    videoCommandList_->ResourceBarrier(videoBarriers_.Count(), videoBarriers_.Data());
+}
+
+void D3D12VideoEncodeBackend::recordCopyBarrierPhase() {
+    if (copyBarriers_.Empty()) return;
+    if (ShouldTraceFrame(frameIndex_)) {
+        std::ostringstream oss;
+        oss << "Stage frame=" << frameIndex_
+            << " commandList=DIRECT record barrier phase count=" << copyBarriers_.Count();
+        log_.info(oss.str());
     }
-    return false;
+    copyCommandList_->ResourceBarrier(copyBarriers_.Count(), copyBarriers_.Data());
 }
 
 void D3D12VideoEncodeBackend::recordEncodeFrame(ID3D12Resource* resource, D3D12_RESOURCE_STATES currentState, bool restoreInputState) {
@@ -1053,6 +1035,7 @@ void D3D12VideoEncodeBackend::recordEncodeFrame(ID3D12Resource* resource, D3D12_
         log_.info(states.str());
     }
 
+    videoBarriers_.Clear();
     transitionVideo("input texture", resource, currentState, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ);
     transitionVideo("bitstream buffer", bitstreamBuffer_.Get(), bitstreamState_, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
     transitionVideo("encoder metadata buffer", encoderMetadataBuffer_.Get(), encoderMetadataState_, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE);
@@ -1061,6 +1044,9 @@ void D3D12VideoEncodeBackend::recordEncodeFrame(ID3D12Resource* resource, D3D12_
 
     if (!idr && hasReferenceFrame_) {
         transitionVideo("previous reconstructed texture", reconstructedPictures_[previousReconIndex_].Get(), reconstructedStates_[previousReconIndex_], D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ);
+    }
+    recordVideoBarrierPhase();
+    if (!idr && hasReferenceFrame_) {
         reconstructedStates_[previousReconIndex_] = D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ;
     }
 
@@ -1209,7 +1195,9 @@ void D3D12VideoEncodeBackend::recordEncodeFrame(ID3D12Resource* resource, D3D12_
         log_.info(afterEncode.str());
     }
 
+    videoBarriers_.Clear();
     transitionVideo("encoder metadata buffer", encoderMetadataBuffer_.Get(), D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ);
+    recordVideoBarrierPhase();
 
     CodecProfileStorage profile(desc_.codec, desc_.internalFormat);
     D3D12_VIDEO_ENCODER_RESOLVE_METADATA_INPUT_ARGUMENTS resolveInput = {};
@@ -1238,6 +1226,7 @@ void D3D12VideoEncodeBackend::recordEncodeFrame(ID3D12Resource* resource, D3D12_
         log_.info(afterResolve.str());
     }
 
+    videoBarriers_.Clear();
     if (restoreInputState) {
         transitionVideo("input texture restore", resource, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ, currentState);
     }
@@ -1249,6 +1238,7 @@ void D3D12VideoEncodeBackend::recordEncodeFrame(ID3D12Resource* resource, D3D12_
     if (!idr && hasReferenceFrame_) {
         transitionVideo("previous reconstructed texture video queue handoff", reconstructedPictures_[previousReconIndex_].Get(), D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ, D3D12_RESOURCE_STATE_COMMON);
     }
+    recordVideoBarrierPhase();
 
     bitstreamState_ = D3D12_RESOURCE_STATE_COMMON;
     encoderMetadataState_ = D3D12_RESOURCE_STATE_COMMON;
@@ -1321,27 +1311,14 @@ void D3D12VideoEncodeBackend::copyOutputsToReadback() {
 
     const auto bitstreamBeforeCopy = bitstreamState_;
     const auto resolvedMetadataBeforeCopy = resolvedMetadataState_;
-    auto transitionCopyAndTrack = [&](const char* logicalName,
-                                      ID3D12Resource* resource,
-                                      D3D12_RESOURCE_STATES& stateMember,
-                                      D3D12_RESOURCE_STATES after) {
-        const auto before = stateMember;
-        if (before == after) return;
-        if (!transitionCopy(logicalName, resource, before, after)) {
-            std::ostringstream oss;
-            oss << "copy transition for " << logicalName
-                << " from " << FormatResourceState(before)
-                << "(" << FormatResourceStateHex(before) << ")"
-                << " to " << FormatResourceState(after)
-                << "(" << FormatResourceStateHex(after) << ")"
-                << " was not recorded.";
-            throw D3DVideoEncoderError(oss.str());
-        }
-        stateMember = after;
-    };
-
-    transitionCopyAndTrack("bitstream buffer", bitstreamBuffer_.Get(), bitstreamState_, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    transitionCopyAndTrack("resolved metadata buffer", resolvedMetadataBuffer_.Get(), resolvedMetadataState_, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    copyBarriers_.Clear();
+    const bool bitstreamCopyTransition = transitionCopy(
+        "bitstream buffer", bitstreamBuffer_.Get(), bitstreamState_, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    const bool metadataCopyTransition = transitionCopy(
+        "resolved metadata buffer", resolvedMetadataBuffer_.Get(), resolvedMetadataState_, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    recordCopyBarrierPhase();
+    if (bitstreamCopyTransition) bitstreamState_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    if (metadataCopyTransition) resolvedMetadataState_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
 
     copyCommandList_->CopyBufferRegion(bitstreamReadback_.Get(), 0, bitstreamBuffer_.Get(), 0, bitstreamBufferSize_);
     copyCommandList_->CopyBufferRegion(resolvedMetadataReadback_.Get(), 0, resolvedMetadataBuffer_.Get(), 0, resolvedMetadataBufferSize_);
@@ -1356,8 +1333,14 @@ void D3D12VideoEncodeBackend::copyOutputsToReadback() {
 
     const auto bitstreamAfterCopy = bitstreamState_;
     const auto resolvedMetadataAfterCopy = resolvedMetadataState_;
-    transitionCopyAndTrack("bitstream buffer", bitstreamBuffer_.Get(), bitstreamState_, D3D12_RESOURCE_STATE_COMMON);
-    transitionCopyAndTrack("resolved metadata buffer", resolvedMetadataBuffer_.Get(), resolvedMetadataState_, D3D12_RESOURCE_STATE_COMMON);
+    copyBarriers_.Clear();
+    const bool bitstreamRestoreTransition = transitionCopy(
+        "bitstream buffer", bitstreamBuffer_.Get(), bitstreamState_, D3D12_RESOURCE_STATE_COMMON);
+    const bool metadataRestoreTransition = transitionCopy(
+        "resolved metadata buffer", resolvedMetadataBuffer_.Get(), resolvedMetadataState_, D3D12_RESOURCE_STATE_COMMON);
+    recordCopyBarrierPhase();
+    if (bitstreamRestoreTransition) bitstreamState_ = D3D12_RESOURCE_STATE_COMMON;
+    if (metadataRestoreTransition) resolvedMetadataState_ = D3D12_RESOURCE_STATE_COMMON;
 
     if (ShouldTraceFrame(frameIndex_)) {
         std::ostringstream bitstream;
@@ -1412,16 +1395,17 @@ void D3D12VideoEncodeBackend::waitForCopyQueue() {
             beforeSignal << "Stage frame=" << frameIndex_ << " before Direct queue Signal";
             log_.info(beforeSignal.str());
         }
-        const auto point = directQueue.SignalPoint();
+        const UINT64 fenceValue = directQueue.Signal();
+        ID3D12Fence* fence = directQueue.Fence().Get();
         if (ShouldTraceFrame(frameIndex_)) {
-            log_.info(FormatFenceProgress("Stage after Direct queue Signal", point));
+            log_.info(FormatFenceProgress("Stage after Direct queue Signal", fenceValue, fence));
             std::ostringstream beforeWait;
             beforeWait << "Stage frame=" << frameIndex_ << " before Direct fence wait";
             log_.info(beforeWait.str());
         }
-        directQueue.CpuWaitPoint(point);
+        directQueue.WaitForFenceValue(fenceValue);
         if (ShouldTraceFrame(frameIndex_)) {
-            log_.info(FormatFenceProgress("Stage after Direct fence wait", point));
+            log_.info(FormatFenceProgress("Stage after Direct fence wait", fenceValue, fence));
         }
     } catch (const std::exception& e) {
         throw D3DVideoEncoderError(std::string("D3D12 Video Encode direct queue wait failed: ") + e.what());
@@ -1589,12 +1573,17 @@ void D3D12VideoEncodeBackend::flush() {
     }
 }
 
+void D3D12VideoEncodeBackend::waitForProcessingCompletion() {
+    if (processingFenceValue_ == 0 || !desc_.input.core) return;
+    const UINT64 fenceValue = processingFenceValue_;
+    processingFenceValue_ = 0;
+    desc_.input.core->DirectQueue().WaitForFenceValue(fenceValue);
+}
+
 void D3D12VideoEncodeBackend::destroyObjects() noexcept {
-    if (processingFenceValue_ != 0 && desc_.input.core) {
-        desc_.input.core->DirectQueue().WaitForFenceValue(processingFenceValue_);
-        processingFenceValue_ = 0;
-    }
-    writer_.close();
+    videoBarriers_.Clear();
+    copyBarriers_.Clear();
+    processingFenceValue_ = 0;
     convertedTexture_ = {};
     yuvToRgbaTexture_ = {};
     resizedTexture_ = {};
@@ -1613,19 +1602,26 @@ void D3D12VideoEncodeBackend::destroyObjects() noexcept {
     encoder_.Reset();
     videoDevice3_.Reset();
     videoDevice_.Reset();
+    bitstreamState_ = D3D12_RESOURCE_STATE_COMMON;
+    encoderMetadataState_ = D3D12_RESOURCE_STATE_COMMON;
+    resolvedMetadataState_ = D3D12_RESOURCE_STATE_COMMON;
+    reconstructedStates_.fill(D3D12_RESOURCE_STATE_COMMON);
 }
 
 void D3D12VideoEncodeBackend::close() {
-    if (!open_) {
-        destroyObjects();
-        return;
-    }
     std::exception_ptr pending;
-    try {
-        flush();
-    } catch (...) {
-        pending = std::current_exception();
-    }
+    const auto captureFirst = [&pending](auto&& operation) noexcept {
+        try {
+            operation();
+        } catch (...) {
+            if (!pending) pending = std::current_exception();
+        }
+    };
+
+    if (open_) captureFirst([this] { flush(); });
+    captureFirst([this] { waitForProcessingCompletion(); });
+    if (writer_.isOpen()) captureFirst([this] { writer_.close(); });
+
     open_ = false;
     destroyObjects();
     if (pending) {

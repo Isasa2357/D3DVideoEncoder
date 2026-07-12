@@ -2,8 +2,8 @@ param(
     [string]$VideoRoot = "",
     [string]$ShortSource = "",
     [string]$LongSource = "",
-    [string]$FFmpegPath = "C:\Program Files (x86)\ffmpeg-8.0.1-essentials_build\bin\ffmpeg.exe",
-    [string]$FFprobePath = "C:\Program Files (x86)\ffmpeg-8.0.1-essentials_build\bin\ffprobe.exe"
+    [string]$FFmpegPath = "",
+    [string]$FFprobePath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,6 +17,46 @@ function Resolve-FullPath([string]$Path) {
         return [System.IO.Path]::GetFullPath($Path)
     }
     return [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $Path))
+}
+
+function Resolve-ToolPath(
+    [string]$RequestedPath,
+    [string]$EnvironmentVariable,
+    [string]$CommandName,
+    [string]$FallbackDirectory = ""
+) {
+    $candidates = New-Object System.Collections.Generic.List[string]
+    if (![string]::IsNullOrWhiteSpace($RequestedPath)) {
+        $candidates.Add($RequestedPath)
+    }
+    $environmentPath = [Environment]::GetEnvironmentVariable($EnvironmentVariable)
+    if (![string]::IsNullOrWhiteSpace($environmentPath)) {
+        $candidates.Add($environmentPath)
+    }
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return Resolve-FullPath $candidate
+        }
+        $command = Get-Command -Name $candidate -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $command) {
+            return [System.IO.Path]::GetFullPath($command.Source)
+        }
+        throw "$CommandName not found at requested path or command: $candidate"
+    }
+
+    if (![string]::IsNullOrWhiteSpace($FallbackDirectory)) {
+        $sibling = Join-Path $FallbackDirectory $CommandName
+        if (Test-Path -LiteralPath $sibling -PathType Leaf) {
+            return Resolve-FullPath $sibling
+        }
+    }
+
+    $fromPath = Get-Command -Name $CommandName -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $fromPath) {
+        return [System.IO.Path]::GetFullPath($fromPath.Source)
+    }
+    throw "$CommandName not found. Pass an explicit path, set $EnvironmentVariable, or add it to PATH."
 }
 
 function Quote-Arg([string]$Value) {
@@ -122,9 +162,18 @@ function Invoke-LoggedFfmpeg([string[]]$FfmpegArgs, [string]$LogPath) {
 
 function Get-TargetForAsset([string]$RelativePath, [string]$CommandHash) {
     $target = Join-Path $script:GeneratedRoot $RelativePath
-    $existing = $script:PreviousByPath[$RelativePath]
+    $manifestKey = $RelativePath -replace "\\", "/"
+    $existing = $script:PreviousByPath[$manifestKey]
     if (Test-Path -LiteralPath $target) {
-        if (!$existing -or $existing.commandHash -eq $CommandHash) {
+        $properties = if ($null -ne $existing) { @($existing.PSObject.Properties.Name) } else { @() }
+        $hasTrustedManifestEntry =
+            $null -ne $existing -and
+            $properties -contains "commandHash" -and
+            $properties -contains "sha256" -and
+            ![string]::IsNullOrWhiteSpace([string]$existing.sha256)
+        if ($hasTrustedManifestEntry -and
+            $existing.commandHash -eq $CommandHash -and
+            (Get-FileSha256 $target) -eq ([string]$existing.sha256).ToLowerInvariant()) {
             return @{
                 Path = $target
                 RelativePath = $RelativePath
@@ -145,11 +194,13 @@ function Get-TargetForAsset([string]$RelativePath, [string]$CommandHash) {
     $name = [System.IO.Path]::GetFileNameWithoutExtension($RelativePath)
     $ext = [System.IO.Path]::GetExtension($RelativePath)
     $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $candidateRel = Join-Path $dir ($name + "_" + $stamp + $ext)
+    $candidateName = $name + "_" + $stamp + $ext
+    $candidateRel = if ([string]::IsNullOrWhiteSpace($dir)) { $candidateName } else { Join-Path $dir $candidateName }
     $candidate = Join-Path $script:GeneratedRoot $candidateRel
     $i = 1
     while (Test-Path -LiteralPath $candidate) {
-        $candidateRel = Join-Path $dir ($name + "_" + $stamp + "_" + $i + $ext)
+        $candidateName = $name + "_" + $stamp + "_" + $i + $ext
+        $candidateRel = if ([string]::IsNullOrWhiteSpace($dir)) { $candidateName } else { Join-Path $dir $candidateName }
         $candidate = Join-Path $script:GeneratedRoot $candidateRel
         ++$i
     }
@@ -316,15 +367,12 @@ if ([string]::IsNullOrWhiteSpace($VideoRoot)) {
 }
 
 $VideoRoot = Resolve-FullPath $VideoRoot
-$script:FFmpegPath = Resolve-FullPath $FFmpegPath
-$script:FFprobePath = Resolve-FullPath $FFprobePath
-
-if (!(Test-Path -LiteralPath $script:FFmpegPath)) {
-    throw "ffmpeg not found: $script:FFmpegPath"
-}
-if (!(Test-Path -LiteralPath $script:FFprobePath)) {
-    throw "ffprobe not found: $script:FFprobePath"
-}
+$script:FFmpegPath = Resolve-ToolPath $FFmpegPath "D3DVIDEOENCODER_FFMPEG" "ffmpeg.exe"
+$script:FFprobePath = Resolve-ToolPath `
+    $FFprobePath `
+    "D3DVIDEOENCODER_FFPROBE" `
+    "ffprobe.exe" `
+    (Split-Path -Parent $script:FFmpegPath)
 if (!(Test-Path -LiteralPath $VideoRoot)) {
     throw "video root not found: $VideoRoot"
 }
@@ -355,7 +403,8 @@ if (Test-Path -LiteralPath $manifestPath) {
     try {
         $previous = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
         foreach ($entry in $previous.assets) {
-            $script:PreviousByPath[$entry.relativePath] = $entry
+            $manifestKey = ([string]$entry.relativePath) -replace "\\", "/"
+            $script:PreviousByPath[$manifestKey] = $entry
         }
     } catch {
         $script:PreviousByPath = @{}
@@ -385,11 +434,21 @@ if ($candidates.Count -eq 0) {
 }
 
 if ([string]::IsNullOrWhiteSpace($LongSource)) {
-    $longCandidate = $candidates | Sort-Object @{ Expression = { [Math]::Abs($_.duration - 600.0) } }, path | Select-Object -First 1
+    $longMatches = @($candidates | Where-Object { [Math]::Abs($_.duration - 600.0) -le 180.0 })
+    if ($longMatches.Count -ne 1) {
+        $matches = ($longMatches | ForEach-Object { "$($_.path) ($($_.duration)s)" }) -join "; "
+        throw "long source selection is ambiguous or missing (expected exactly one approximately 10-minute candidate, found $($longMatches.Count): $matches). Pass -LongSource explicitly."
+    }
+    $longCandidate = $longMatches[0]
     $LongSource = $longCandidate.path
 }
 if ([string]::IsNullOrWhiteSpace($ShortSource)) {
-    $shortCandidate = $candidates | Sort-Object @{ Expression = { [Math]::Abs($_.duration - 10.0) } }, path | Select-Object -First 1
+    $shortMatches = @($candidates | Where-Object { [Math]::Abs($_.duration - 10.0) -le 10.0 })
+    if ($shortMatches.Count -ne 1) {
+        $matches = ($shortMatches | ForEach-Object { "$($_.path) ($($_.duration)s)" }) -join "; "
+        throw "short source selection is ambiguous or missing (expected exactly one approximately 10-second candidate, found $($shortMatches.Count): $matches). Pass -ShortSource explicitly."
+    }
+    $shortCandidate = $shortMatches[0]
     $ShortSource = $shortCandidate.path
 }
 
@@ -400,6 +459,9 @@ if (!(Test-Path -LiteralPath $LongSource)) {
 }
 if (!(Test-Path -LiteralPath $ShortSource)) {
     throw "short source not found: $ShortSource"
+}
+if ([StringComparer]::OrdinalIgnoreCase.Equals($LongSource, $ShortSource)) {
+    throw "long and short source resolved to the same file; pass distinct sources explicitly."
 }
 
 $sourceSummary = @()

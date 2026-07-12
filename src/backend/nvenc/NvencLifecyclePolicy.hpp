@@ -10,4 +10,8 @@ inline bool ShouldDrainNvencEos(NVENCSTATUS status, uint64_t sentFrameCount, uin
     return status == NV_ENC_SUCCESS && receivedPacketCount < sentFrameCount;
 }
 
+inline bool IsSupportedNvencBFrameCount(uint32_t bFrameCount) noexcept {
+    return bFrameCount == 0;
+}
+
 } // namespace D3DVideoEncoderLib

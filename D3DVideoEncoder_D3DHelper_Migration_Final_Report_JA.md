@@ -4,7 +4,9 @@
 
 - status: acceptance pass; release readiness conditional
 - baseline commit: `104c07b4876b698df19347d2532e116d759b6a95`
-- final local worktree: `main`, uncommitted migration changes present
+- accepted migration commit: `4b937f07fe0ff3ccf729a94573f040b61bcbfb79`
+- final branch: `d3dhelper-migration`, tracking `origin/d3dhelper-migration`
+- review-fix commit: the commit containing this report update
 - Structural migration: complete
 - Build validation: complete
 - Native D3D12 hardware acceptance: pass
@@ -16,7 +18,8 @@
 - Output decode validation: pass for the above backends
 - Public API compatibility: maintained
 - Release readiness: conditional
-- GitHub changes: none
+- GitHub changes: `d3dhelper-migration` branch pushed normally; `main` unchanged
+- PR / tag / release: none
 - original video files modified: no
 
 ## 2. Selected dependencies
@@ -50,7 +53,7 @@ Local validation used the trusted `../extern/D3D11Helper-1.13.0` and
 | `src/backend/mux/NvencMp4DurationBoxes.hpp` | Internal 64-bit duration box helpers | Testable `mvhd`/`tkhd`/`mdhd` version 1 encoding |
 | `sample/03_*`, `sample/04_*` | CMake/runtime deployment and unified capability diagnostics | Current Helper/runtime behavior |
 | `test/CMakeLists.txt`, `test/test_*.cpp` | Capability, hardware, lifecycle, GOP, slot and duration regressions | Preserve migration invariants and acceptance cases |
-| `tools/make_test_videos.*` | Deterministic generated test assets and manifest | Repeatable tests without modifying source videos |
+| `tools/make_test_videos.*` | Deterministic assets, verified reuse, portable FFmpeg discovery and manifest | Repeatable tests without modifying source videos |
 | `README.md`, this report | Validation matrix and final audit | Final documentation |
 
 The worktree also contains the approved task and migration specification documents. No
@@ -78,13 +81,14 @@ public file under `include/` was changed.
 | NVENC open/query/init/register/map/encode/lock/unlock/EOS APIs | NVENC backend | NVIDIA session and codec contract |
 | D3D11 `nvEncCreateBitstreamBuffer` and async event APIs | NVENC D3D11 | Accepted system-memory output strategy |
 | D3D12 READBACK resource, fence and persistent event | NVENC D3D12 output strategy | Exact SDK output-resource/fence contract; no Helper extension is appropriate |
-| persistent processing fence wait | native/NVENC D3D12 processing | Avoid `CpuWaitPoint` implementations that allocate a Win32 event per frame |
+| `D3D12Queue::Signal` + `WaitForFenceValue` | native/NVENC D3D12 CPU completion | Reuse the queue-owned `D3D12Fence` persistent event; avoid per-call `CpuWaitPoint` events |
 | Media Foundation sink writer APIs | Media Foundation backend | Backend-specific encoding contract |
 
 ## 6. Synchronization proof
 
-- processing completion: existing Direct Queue submission/signal/wait order is retained. The
-  processing wait uses a backend-lifetime persistent wait object, so no per-frame event is created.
+- processing/copy completion: existing Direct Queue submission/signal/wait order is retained.
+  `Signal()` + `WaitForFenceValue()` uses the queue-owned `D3D12Fence` persistent event, so no
+  per-frame event is created.
 - video -> direct: Video Queue signals one `D3D12QueueSyncPoint`; Direct Queue performs
   `GpuWaitPoint` before bitstream/metadata copy.
 - direct copy -> CPU map: Direct Queue copy is submitted and its completion point is CPU-waited
@@ -95,6 +99,9 @@ public file under `include/` was changed.
   transitions `Free -> Prepared -> Submitted -> FenceCompleted -> Locked -> Free`.
 - count proof: the migration adds no D3D12 Queue submission, Queue signal/wait, GPU copy, or
   processing dispatch. The required NVENC output-fence wait does not allocate per frame.
+- barrier proof: Video and Direct barrier batches are backend members, reserved once during
+  initialization and cleared/reused for pre-encode, metadata, post-encode, copy-pre and copy-post
+  phases. Their vectors do not allocate in the per-frame path.
 
 ## 7. Ownership / lifetime proof
 
@@ -135,6 +142,7 @@ public file under `include/` was changed.
 | Release full CTest | 25/27 | two known Media Foundation failures |
 
 The failing tests remain enabled and were not converted to skip/success.
+Post-review validation also completed Debug/Release `ALL_BUILD` and the focused regression set.
 
 ## 10. Backend tests
 
@@ -145,6 +153,10 @@ The failing tests remain enabled and were not converted to skip/success.
 | NVENC D3D12 | pass | pass | pass | pass | pass | validated |
 | D3D11 Media Foundation | pass | fail | unverified | fail/unverified | not run | known issues |
 
+Post-review Release revalidation encoded 300/300 direct NV12 H.264 frames on Native D3D12,
+NVENC D3D11 and NVENC D3D12. All three outputs were 640x360, FFprobe reported 300 frames,
+and FFmpeg decode returned exit code 0. Accepted 10-minute tests were not repeated.
+
 Hardware acceptance used NVIDIA GeForce RTX 5070 Ti. No fixed adapter LUID is recorded or
 required: each process obtains `ID3D12Device::GetAdapterLuid()` and validates that current value
 with `IDXGIFactory4::EnumAdapterByLuid()` and adapter identity.
@@ -153,6 +165,10 @@ with `IDXGIFactory4::EnumAdapterByLuid()` and adapter identity.
 
 - FFmpeg: `C:\Program Files (x86)\ffmpeg-8.0.1-essentials_build\bin\ffmpeg.exe`
 - FFprobe: `C:\Program Files (x86)\ffmpeg-8.0.1-essentials_build\bin\ffprobe.exe`
+- generator tool discovery: explicit parameter, `D3DVIDEOENCODER_FFMPEG` /
+  `D3DVIDEOENCODER_FFPROBE`, sibling executable, then `PATH`; no machine-specific default
+- reuse policy: existing files are reused only when manifest command hash and current SHA-256
+  both match; ambiguous automatic long/short source selection stops with an error
 - manifest: `../video/generated/logs/generated_assets_manifest.json`
 - short NV12 raw: 103,680,000 bytes, matching 300 frames at 640x360 NV12
 - long normalized source: 19,799 frames at 30 fps
@@ -180,6 +196,7 @@ with `IDXGIFactory4::EnumAdapterByLuid()` and adapter identity.
 | GPU copies per frame | existing path | existing path | 0 |
 | Processing dispatches per converted frame | existing path | existing path | 0 |
 | Per-frame Resource/Fence/Event allocation | 0 required | 0 | 0 |
+| Per-frame barrier vector allocation | old local batches | 0 | member batches reserved 6/2 at initialization |
 | NVENC D3D12 output ring | unavailable/invalid old path | 4 slots in tested configuration | initialization-time fixed storage |
 
 Handle plateau tests showed no iteration-proportional growth. NVENC D3D12 output slots are freed
@@ -247,7 +264,8 @@ Release readiness remains conditional on these known issues. Media Foundation te
 - [x] Debug Layer introduced no new accepted-backend errors.
 - [x] Performance, memory, retained raw APIs and known failures documented.
 - [x] Generated assets are outside Git; original videos are unchanged.
-- [x] Helper repositories and GitHub were not modified.
+- [x] Helper repositories were not modified; GitHub changes are limited to the normal
+  `d3dhelper-migration` branch push, with no PR, tag or release.
 - [ ] PSNR/SSIM were not executed; final acceptance used decode, dimensions, frames, duration,
   timestamps and framemd5 criteria instead.
 

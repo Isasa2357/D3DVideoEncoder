@@ -5,6 +5,7 @@
 #include "backend/d3d12video/ID3D12VideoEncodeBackend.hpp"
 #include "util/DebugLog.hpp"
 
+#include <D3D12Helper/D3D12Core/D3D12BarrierBatch.hpp>
 #include <D3D12Helper/D3D12Core/D3D12CommandContext.hpp>
 #include <D3D12Helper/D3D12Core/D3D12Queue.hpp>
 #include <D3D12Helper/D3D12Framework/D3D12DescriptorAllocator.hpp>
@@ -50,6 +51,7 @@ private:
     void createQueuesAndCommands();
     void createBuffers();
     void createReconstructedPictures();
+    void waitForProcessingCompletion();
     void destroyObjects() noexcept;
 
     bool inputAlreadyMatchesInternalFormat() const noexcept;
@@ -70,6 +72,8 @@ private:
 
     void transitionVideo(const char* logicalName, ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
     bool transitionCopy(const char* logicalName, ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
+    void recordVideoBarrierPhase();
+    void recordCopyBarrierPhase();
     void signalVideoAndWaitOnCopy();
 
     DebugLog log_;
@@ -87,6 +91,8 @@ private:
 
     D3D12CoreLib::D3D12CommandAllocatorContext copyAllocator_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> copyCommandList_;
+    D3D12CoreLib::D3D12BarrierBatch videoBarriers_;
+    D3D12CoreLib::D3D12BarrierBatch copyBarriers_;
 
     D3D12CoreLib::D3D12Resource bitstreamBuffer_;
     D3D12CoreLib::D3D12ReadbackBuffer bitstreamReadback_;
