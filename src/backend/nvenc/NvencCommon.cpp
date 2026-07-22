@@ -387,9 +387,9 @@ void NvencEncoderSession::initialize(
     encodeConfig.rcParams.maxBitRate = desc_.bitrate;
     encodeConfig.rcParams.vbvBufferSize = desc_.bitrate;
     encodeConfig.rcParams.vbvInitialDelay = desc_.bitrate;
-    encodeConfig.rcParams.constQP.qpInterP = 20;
-    encodeConfig.rcParams.constQP.qpInterB = 22;
-    encodeConfig.rcParams.constQP.qpIntra = 18;
+    encodeConfig.rcParams.constQP.qpInterP = 23;
+    encodeConfig.rcParams.constQP.qpInterB = 23;
+    encodeConfig.rcParams.constQP.qpIntra = 23;
 
     if (desc_.codec == VideoCodec::H264) {
         encodeConfig.encodeCodecConfig.h264Config.repeatSPSPPS = 1;
